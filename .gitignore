@@ -1,0 +1,29 @@
+# Ignore virtual environment directory
+.venv/
+venv/
+virtualenv/
+virtualenvs/
+__pypackages__/
+
+# Ignore compiled Python files
+*.pyc
+__pycache__/
+
+# Ignore build artifacts
+build/
+dist/
+*.egg-info/
+
+# Ignore editor/IDE specific files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Ignore operating system files
+.DS_Store
+thumbs.db
+
+# Ignore project-specific files
+mediamtx.log
+uploads/ 

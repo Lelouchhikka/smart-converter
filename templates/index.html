@@ -1,0 +1,587 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RTMP-RTSP Монитор</title>
+    <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@1.4.12/dist/hls.min.js"></script>
+    <style>
+        /* ... existing styles ... */
+        
+        .stream-item {
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 15px;
+            margin-bottom: 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+        }
+
+        .stream-info {
+            flex: 1;
+        }
+
+        .stream-info h3 {
+            margin: 0 0 10px 0;
+            font-size: 1.1em;
+        }
+
+        .stream-info p {
+            margin: 5px 0;
+            font-size: 0.9em;
+        }
+
+        .stream-actions {
+            margin-left: 15px;
+        }
+
+        .delete-btn {
+            background: #dc3545;
+            color: white;
+            border: none;
+            padding: 5px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        .delete-btn:hover {
+            background: #c82333;
+        }
+
+        .status-active {
+            color: #28a745;
+        }
+
+        .status-inactive {
+            color: #dc3545;
+        }
+
+        .status-pending {
+            color: #ffc107;
+        }
+    </style>
+</head>
+
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row mb-3">
+    <div class="col-12">
+        
+        <button type="button" class="btn btn-success ms-2" data-bs-toggle="modal" data-bs-target="#rtmpSimulatorModal">
+            <i class="fas fa-video"></i> RTMP Симулятор
+        </button>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-8">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-map-marked-alt"></i> Карта дронов
+                </h5>
+            </div>
+            <div class="card-body">
+                <div id="map"></div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-video"></i> Активные потоки
+                </h5>
+            </div>
+            <div class="card-body">
+                <div id="streamsList"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row mt-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-chart-line"></i> Телеметрия
+                </h5>
+            </div>
+            <div class="card-body">
+                <canvas id="telemetry-chart"></canvas>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Модальное окно симулятора RTMP -->
+<div class="modal fade" id="rtmpSimulatorModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">RTMP Симулятор</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="row">
+                    <div class="col-md-6">
+                        <div class="mb-3">
+                            <label class="form-label">Предпросмотр</label>
+                            <video id="previewVideo" class="w-100" autoplay muted controls></video>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">RTMP URL</label>
+                            <div class="input-group">
+                                <input type="text" class="form-control" id="rtmpUrl" value="rtmp://localhost:1935/" readonly>
+                                <button class="btn btn-outline-secondary" type="button" onclick="copyRtmpUrl(event)">
+                                    <i class="fas fa-copy"></i>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Ключ потока</label>
+                            <input type="text" class="form-control" id="streamKey" value="test_stream">
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="mb-3">
+                            <label class="form-label">Статус</label>
+                            <div id="streamStatus" class="alert alert-info">Готов к трансляции</div>
+                        </div>
+                        <div class="mb-3" id="fileUploadSection">
+                            <label class="form-label">Загрузить видеофайл</label>
+                            <input type="file" class="form-control" id="videoFile" accept="video/*">
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-primary" id="startStreamBtn">Начать трансляцию</button>
+                <button type="button" class="btn btn-danger" id="stopStreamBtn" style="display: none;">Остановить</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+let map;
+let markers = {};
+let telemetryChart;
+let selectedDrone = null;
+let lastStreams = {};
+
+// RTMP Симулятор
+let mediaRecorder;
+let stream;
+let wsConnection;
+let videoFile = null;
+
+// Инициализация карты
+function initMap() {
+    map = L.map('map').setView([43.238949, 76.889709], 13);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© OpenStreetMap contributors'
+    }).addTo(map);
+}
+
+// Обновление маркеров на карте
+function updateMarkers(telemetry) {
+    for (const [streamId, data] of Object.entries(telemetry)) {
+        if (!markers[streamId]) {
+            markers[streamId] = L.marker([data.latitude, data.longitude]).addTo(map);
+            markers[streamId].bindPopup(`
+                <strong>Дрон: ${streamId}</strong><br>
+                Высота: ${data.altitude.toFixed(1)} м<br>
+                Скорость: ${data.speed.toFixed(1)} м/с<br>
+                Батарея: ${data.battery.toFixed(1)}%<br>
+                Сигнал: ${data.signal_strength.toFixed(1)}%
+            `);
+        } else {
+            markers[streamId].setLatLng([data.latitude, data.longitude]);
+        }
+    }
+}
+
+// Обновление списка дронов с real-time HLS
+async function updateDronesList(telemetry) {
+    // Этот блок кода будет удален, так как рендеринг будет выполняться в updateData
+    // ... старый код updateDronesList ...
+    
+    // Оставляем возможность использования данных телеметрии для других целей, если потребуется
+    // console.log("Received telemetry in updateDronesList:", telemetry);
+}
+
+// Инициализация графика телеметрии
+function initTelemetryChart() {
+    const ctx = document.getElementById('telemetry-chart').getContext('2d');
+    telemetryChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: [],
+            datasets: [{
+                label: 'Высота',
+                data: [],
+                borderColor: 'rgb(75, 192, 192)',
+                tension: 0.1
+            }, {
+                label: 'Скорость',
+                data: [],
+                borderColor: 'rgb(255, 99, 132)',
+                tension: 0.1
+            }]
+        },
+        options: {
+            responsive: true,
+            scales: {
+                y: {
+                    beginAtZero: true
+                }
+            }
+        }
+    });
+}
+
+// Обновление данных
+async function updateData() {
+    try {
+        const [telemetryResponse, healthResponse] = await Promise.all([
+            fetch('/api/telemetry'),
+            fetch('/api/health')
+        ]);
+        
+        if (telemetryResponse.ok && healthResponse.ok) {
+            const telemetry = await telemetryResponse.json();
+            const health = await healthResponse.json();
+            
+            updateMarkers(telemetry);
+            // updateDronesList(telemetry); // Вызов устаревшей логики, удаляем
+            
+            // Получаем список потоков отдельно для отображения списка
+            const streamsResponse = await fetch('/api/streams');
+             if (streamsResponse.ok) {
+                 const streams = await streamsResponse.json();
+                 console.log("Streams received in updateData:", streams); // Логируем полученные потоки
+                 lastStreams = streams.reduce((acc, stream) => {
+                     acc[stream.stream_key] = stream;
+                     return acc;
+                 }, {});
+                 renderStreamsList(streams); // Рендерим список потоков, используя новую функцию
+             } else {
+                 console.error('Ошибка при получении списка потоков:', streamsResponse.statusText);
+             }
+
+            // Обновление статуса сервера
+            document.getElementById('server-status').className = 
+                `badge ${health.status === 'healthy' ? 'bg-success' : 'bg-danger'}`;
+            document.getElementById('server-status').textContent = 
+                health.status === 'healthy' ? 'Сервер активен' : 'Сервер недоступен';
+        } else {
+            console.error('Ошибка при получении данных:', 
+                telemetryResponse.statusText || healthResponse.statusText);
+             // Если API недоступен, показываем, что сервер недоступен
+             document.getElementById('server-status').className = `badge bg-danger`;
+             document.getElementById('server-status').textContent = 'Сервер недоступен';
+        }
+    } catch (error) {
+        console.error('Ошибка при обновлении данных:', error);
+         // Если произошла ошибка, показываем, что сервер недоступен
+         document.getElementById('server-status').className = `badge bg-danger`;
+         document.getElementById('server-status').textContent = 'Сервер недоступен';
+    }
+}
+
+// Загрузка списка потоков при загрузке страницы и каждом открытии модального окна симулятора
+document.addEventListener('DOMContentLoaded', () => {
+    initMap();
+    loadStreams();
+    // Обновляем список потоков каждые 5 секунд
+    setInterval(loadStreams, 5000);
+});
+
+// Функция для отображения списка потоков
+function renderStreamsList(streams) {
+    const streamsList = document.getElementById('streamsList');
+    if (!streamsList) {
+        console.error('Element with id "streamsList" not found');
+        return;
+    }
+    
+    streamsList.innerHTML = '';
+    
+    if (streams.length === 0) {
+        streamsList.innerHTML = '<div class="alert alert-info">Нет активных потоков</div>';
+        return;
+    }
+    
+    streams.forEach(stream => {
+        console.log('Rendering stream object:', stream);
+        const streamElement = document.createElement('div');
+        streamElement.className = 'stream-item';
+        streamElement.innerHTML = `
+            <div class="stream-info">
+                <h3>Поток: ${stream.stream_key}</h3>
+                <p>Статус: <span class="status-${stream.status}">${stream.status}</span></p>
+                <p>RTMP URL: ${stream.rtmp_url}</p>
+                <p>RTSP URL: ${stream.rtsp_url}</p>
+                <p>HLS URL: ${stream.hls_url || 'N/A'}</p>
+            </div>
+            <div class="stream-actions">
+                <button onclick="deleteStream('${stream.stream_key}')" class="delete-btn">Удалить</button>
+            </div>
+        `;
+        streamsList.appendChild(streamElement);
+    });
+}
+
+// Загрузка списка потоков из API
+async function loadStreams() {
+    try {
+        const response = await fetch('/api/streams');
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        const streams = await response.json();
+        console.log("Streams received in loadStreams:", streams);
+        renderStreamsList(streams);
+    } catch (error) {
+        console.error('Error loading streams:', error);
+        const streamsList = document.getElementById('streamsList');
+        if (streamsList) {
+            streamsList.innerHTML = '<div class="alert alert-warning">Не удалось загрузить список потоков.</div>';
+        }
+    }
+}
+
+// Обновляем функцию stopStream
+function stopStream(closeWs = true) {
+    if (wsConnection && closeWs) {
+        wsConnection.close();
+    }
+
+    const statusDiv = document.getElementById('streamStatus');
+    const startBtn = document.getElementById('startStreamBtn');
+    const stopBtn = document.getElementById('stopStreamBtn');
+    const previewVideo = document.getElementById('previewVideo');
+
+    statusDiv.className = 'alert alert-info';
+    statusDiv.textContent = 'Готов к трансляции';
+    startBtn.style.display = 'block';
+    stopBtn.style.display = 'none';
+
+    // Для файла останавливаем воспроизведение предпросмотра и сбрасываем
+    previewVideo.pause();
+    previewVideo.currentTime = 0; // Сбрасываем на начало
+     if (videoFile) {
+         previewVideo.src = URL.createObjectURL(videoFile); // Перезагружаем для возможности повторного воспроизведения
+     }
+    
+     startBtn.disabled = false; // Включаем обратно
+     stopBtn.disabled = false; // Включаем обратно
+}
+
+function copyRtmpUrl(event) {
+    const rtmpUrl = document.getElementById('rtmpUrl');
+    const streamKey = document.getElementById('streamKey').value;
+    const fullUrl = rtmpUrl.value + streamKey;
+    
+    navigator.clipboard.writeText(fullUrl).then(() => {
+        const btn = event.target.closest('button');
+        const originalText = btn.innerHTML;
+        btn.innerHTML = '<i class="fas fa-check"></i>';
+        setTimeout(() => {
+            btn.innerHTML = originalText;
+        }, 2000);
+    }).catch(err => {
+        console.error('Ошибка копирования:', err);
+    });
+}
+
+// Обработчик кнопки "Начать трансляцию"
+document.getElementById('startStreamBtn').addEventListener('click', async () => {
+    const streamKey = document.getElementById('streamKey').value;
+    const videoSource = 'file'; // Всегда файл
+    const statusDiv = document.getElementById('streamStatus');
+    const startBtn = document.getElementById('startStreamBtn');
+    const stopBtn = document.getElementById('stopStreamBtn');
+
+    if (!streamKey) {
+        statusDiv.className = 'alert alert-danger';
+        statusDiv.textContent = 'Ключ потока не может быть пустым!';
+        return;
+    }
+
+    startBtn.disabled = true; // Отключаем кнопку, чтобы избежать повторных нажатий
+    statusDiv.className = 'alert alert-info';
+    statusDiv.textContent = 'Подготовка к трансляции...';
+
+    let filePath = null;
+    const fileInput = document.getElementById('videoFile');
+    videoFile = fileInput.files[0];
+    const videoLoop = true; // Всегда зацикливаем
+
+    if (!videoFile) {
+        statusDiv.className = 'alert alert-danger';
+        statusDiv.textContent = 'Пожалуйста, выберите видеофайл.';
+        startBtn.disabled = false;
+        return;
+    }
+
+    statusDiv.className = 'alert alert-info';
+    statusDiv.textContent = 'Загрузка файла на сервер...';
+
+    const formData = new FormData();
+    formData.append('file', videoFile);
+
+    try {
+        const uploadResponse = await fetch('/api/upload_video/', {
+            method: 'POST',
+            body: formData
+        });
+
+        if (!uploadResponse.ok) {
+            throw new Error(`Ошибка загрузки файла: ${uploadResponse.statusText}`);
+        }
+
+        const result = await uploadResponse.json();
+        filePath = result.file_path; // Получаем путь к файлу на сервере
+        statusDiv.textContent = 'Файл загружен. Запуск трансляции...';
+
+    } catch (error) {
+        console.error('Ошибка загрузки файла:', error);
+        statusDiv.className = 'alert alert-danger';
+        statusDiv.textContent = `Ошибка загрузки файла: ${error.message}`;
+        startBtn.disabled = false;
+        return;
+    }
+
+    // Устанавливаем WebSocket соединение после подготовки (или загрузки файла)
+    try {
+        // Закрываем предыдущее соединение, если оно есть
+        if (wsConnection && wsConnection.readyState !== WebSocket.CLOSED) {
+             wsConnection.close();
+        }
+        
+        const wsUrl = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/api/ws/${streamKey}`;
+        wsConnection = new WebSocket(wsUrl);
+
+        wsConnection.onopen = () => {
+            console.log('WebSocket connection opened');
+            statusDiv.className = 'alert alert-warning';
+            statusDiv.textContent = 'Трансляция активна (запуск FFmpeg)...';
+            startBtn.style.display = 'none';
+            stopBtn.style.display = 'block';
+            stopBtn.disabled = false; // Включаем кнопку остановки
+
+            // Отправляем данные о источнике через WebSocket
+            const message = {
+                sourceType: videoSource, // Теперь всегда 'file'
+            };
+            message.filePath = filePath; // Путь к загруженному файлу
+            message.loopFile = videoLoop; // Всегда true
+            wsConnection.send(JSON.stringify(message));
+        };
+
+        wsConnection.onmessage = (event) => {
+            // Обработка сообщений от сервера (например, статус FFmpeg)
+            console.log('WebSocket message received:', event.data);
+            try {
+                const message = JSON.parse(event.data);
+                // Обновляем статус на основе сообщений от сервера
+                if (message.status) {
+                     statusDiv.className = `alert alert-${message.status === 'active' ? 'success' : message.status === 'pending' ? 'info' : 'danger'}`;
+                     statusDiv.textContent = message.message || `Статус: ${message.status}`;
+                     if (message.status === 'active') {
+                         statusDiv.className = 'alert alert-success';
+                         statusDiv.textContent = 'Трансляция активна.';
+                     }
+                }
+            } catch (e) {
+                statusDiv.textContent = `Сообщение от сервера: ${event.data}`;
+                console.log('Received non-JSON message:', event.data);
+            }
+        };
+
+        wsConnection.onerror = (error) => {
+            console.error('WebSocket error:', error);
+            statusDiv.className = 'alert alert-danger';
+            statusDiv.textContent = 'Ошибка WebSocket соединения.';
+            startBtn.style.display = 'block';
+            stopBtn.style.display = 'none';
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+        };
+
+        wsConnection.onclose = (event) => {
+            console.log('WebSocket connection closed:', event.code, event.reason);
+            if (event.code !== 1000) { // 1000 - нормальное закрытие
+                statusDiv.className = 'alert alert-danger';
+                statusDiv.textContent = `Трансляция завершена с ошибкой: ${event.code} ${event.reason}`;
+            } else {
+                 statusDiv.className = 'alert alert-success';
+                 statusDiv.textContent = 'Трансляция завершена.';
+            }
+            startBtn.style.display = 'block';
+            stopBtn.style.display = 'none';
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            // Для файла сбрасываем воспроизведение предпросмотра
+            if (videoFile) {
+                const previewVideo = document.getElementById('previewVideo');
+                previewVideo.pause();
+                previewVideo.currentTime = 0;
+                previewVideo.src = URL.createObjectURL(videoFile); // Сбрасываем для возможности повторного воспроизведения
+            }
+        };
+
+    } catch (error) {
+        console.error('Ошибка при установке WebSocket соединения:', error);
+        statusDiv.className = 'alert alert-danger';
+        statusDiv.textContent = `Не удалось установить WebSocket соединение: ${error.message}`;
+        startBtn.disabled = false;
+    }
+});
+
+// Обработчик кнопки "Остановить"
+document.getElementById('stopStreamBtn').addEventListener('click', () => {
+    stopStream(true);
+});
+
+// Обработчик выбора файла
+document.getElementById('videoFile').addEventListener('change', (event) => {
+    videoFile = event.target.files[0];
+    const previewVideo = document.getElementById('previewVideo');
+    if (videoFile) {
+        previewVideo.src = URL.createObjectURL(videoFile);
+        previewVideo.load(); // Загружаем видео для предпросмотра
+    } else {
+        previewVideo.src = '';
+        previewVideo.removeAttribute('src');
+        previewVideo.load();
+    }
+});
+
+async function deleteStream(streamKey) {
+    try {
+        const response = await fetch(`/api/streams/${streamKey}`, {
+            method: 'DELETE'
+        });
+        
+        if (response.ok) {
+            // Обновляем список потоков после успешного удаления
+            await loadStreams();
+        } else {
+            console.error('Error deleting stream:', await response.text());
+        }
+    } catch (error) {
+        console.error('Error deleting stream:', error);
+    }
+}
+</script>
+{% endblock %} 

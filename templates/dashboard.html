@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block title %}Мониторинг потоков БПЛА{% endblock %}
+{% block content %}
+<h2 class="mb-4"><i class="fa-solid fa-drone"></i> Мониторинг потоков БПЛА
+  <span id="health-indicator" class="badge bg-success ms-3">Сервер OK</span>
+</h2>
+<div id="telemetry" class="mb-3"></div>
+<div id="map" style="height: 300px" class="mb-4"></div>
+<div id="streams-list" class="row g-3"></div>
+<h4 class="mt-5">Последние события</h4>
+<ul id="events-list" class="list-group mb-4"></ul>
+<div aria-live="polite" aria-atomic="true" class="position-relative">
+  <div id="toast-container" class="toast-container position-fixed bottom-0 end-0 p-3"></div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+function fetchStreams() {
+    fetch('/api/streams')
+        .then(r => r.json())
+        .then(data => {
+            const list = document.getElementById('streams-list');
+            list.innerHTML = '';
+            data.forEach(stream => {
+                list.innerHTML += `
+                <div class="col-md-6 col-lg-4">
+                  <div class="card shadow-sm">
+                    <div class="card-body">
+                      <h5 class="card-title">
+                        <i class="fa-solid fa-video"></i>
+                        ${stream.path}
+                        <span class="badge bg-${stream.publishers > 0 ? 'success' : 'secondary'} ms-2">${stream.publishers > 0 ? 'Активен' : 'Ожидание'}</span>
+                      </h5>
+                      <p class="mb-1">
+                        <i class="fa-solid fa-link"></i>
+                        <span class="text-monospace">${stream.rtsp_url}</span>
+                        <button class="btn btn-sm btn-outline-secondary ms-2" onclick="copyToClipboard('${stream.rtsp_url}')">
+                          <i class="fa-regular fa-copy"></i>
+                        </button>
+                      </p>
+                      <p class="mb-1">
+                        <i class="fa-solid fa-users"></i> Зрителей: <b>${stream.readers}</b>
+                        <span class="ms-3"><i class="fa-regular fa-clock"></i> Аптайм: ${stream.uptime || '-'}</span>
+                      </p>
+                      <div class="mt-2">
+                        ${stream.publishers > 0 ? '<div class="alert alert-success p-2 text-center">Видеопоток активен</div>' : '<div class="alert alert-secondary p-2 text-center">Нет видеопотока</div>'}
+                      </div>
+                    </div>
+                  </div>
+                </div>`;
+            });
+        });
+}
+function fetchEvents() {
+    fetch('/api/events')
+        .then(r => r.json())
+        .then(data => {
+            const list = document.getElementById('events-list');
+            list.innerHTML = '';
+            data.forEach(ev => {
+                list.innerHTML += `<li class="list-group-item">${ev}</li>`;
+            });
+        });
+}
+function copyToClipboard(text) {
+    navigator.clipboard.writeText(text);
+}
+function checkHealth() {
+    fetch('/api/health').then(r=>r.json()).then(data=>{
+        let el = document.getElementById('health-indicator');
+        if (data.status === 'ok') {
+            el.className = 'badge bg-success ms-3';
+            el.textContent = 'Сервер OK';
+        } else {
+            el.className = 'badge bg-danger ms-3';
+            el.textContent = 'Сервер OFFLINE';
+        }
+    });
+}
+setInterval(fetchStreams, 5000);
+setInterval(fetchEvents, 10000);
+setInterval(checkHealth, 3000);
+fetchStreams();
+fetchEvents();
+checkHealth();
+</script>
+{% endblock %} 

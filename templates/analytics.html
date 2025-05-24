@@ -1,0 +1,356 @@
+{% extends "base.html" %}
+
+{% block head %}
+<link rel="icon" type="image/x-icon" href="/static/favicon.ico">
+{% endblock %}
+
+{% block content %}
+<div class="row mb-3">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-chart-pie"></i> Общая статистика
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-3">
+                        <div class="card bg-primary text-white">
+                            <div class="card-body">
+                                <h6 class="card-title">Активные дроны</h6>
+                                <h2 id="active-drones-count">0</h2>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="card bg-success text-white">
+                            <div class="card-body">
+                                <h6 class="card-title">Средняя высота</h6>
+                                <h2 id="avg-altitude">0 м</h2>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="card bg-warning text-white">
+                            <div class="card-body">
+                                <h6 class="card-title">Средняя скорость</h6>
+                                <h2 id="avg-speed">0 м/с</h2>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="card bg-info text-white">
+                            <div class="card-body">
+                                <h6 class="card-title">Средний заряд</h6>
+                                <h2 id="avg-battery">0%</h2>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-chart-line"></i> Высота и скорость
+                </h5>
+            </div>
+            <div class="card-body">
+                <canvas id="altitude-speed-chart"></canvas>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-battery-three-quarters"></i> Заряд батареи
+                </h5>
+            </div>
+            <div class="card-body">
+                <canvas id="battery-chart"></canvas>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row mt-4">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-signal"></i> Сигнал
+                </h5>
+            </div>
+            <div class="card-body">
+                <canvas id="signal-chart"></canvas>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-map-marked-alt"></i> Траектории
+                </h5>
+            </div>
+            <div class="card-body">
+                <div id="trajectory-map" style="height: 300px;"></div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let charts = {};
+let trajectoryMap;
+let trajectoryLayers = {};
+let updateInterval;
+
+// Инициализация карты
+function initMap() {
+    trajectoryMap = L.map('trajectory-map').setView([43.238949, 76.889709], 13);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© OpenStreetMap contributors'
+    }).addTo(trajectoryMap);
+}
+
+// Инициализация графиков
+function initCharts() {
+    // График высоты и скорости
+    const altitudeSpeedCtx = document.getElementById('altitude-speed-chart').getContext('2d');
+    charts.altitudeSpeed = new Chart(altitudeSpeedCtx, {
+        type: 'line',
+        data: {
+            labels: [],
+            datasets: [{
+                label: 'Высота (м)',
+                data: [],
+                borderColor: 'rgb(75, 192, 192)',
+                tension: 0.1
+            }, {
+                label: 'Скорость (м/с)',
+                data: [],
+                borderColor: 'rgb(255, 99, 132)',
+                tension: 0.1
+            }]
+        },
+        options: {
+            responsive: true,
+            scales: {
+                y: {
+                    beginAtZero: true
+                }
+            }
+        }
+    });
+
+    // График заряда батареи
+    const batteryCtx = document.getElementById('battery-chart').getContext('2d');
+    charts.battery = new Chart(batteryCtx, {
+        type: 'line',
+        data: {
+            labels: [],
+            datasets: [{
+                label: 'Заряд (%)',
+                data: [],
+                borderColor: 'rgb(54, 162, 235)',
+                backgroundColor: 'rgba(54, 162, 235, 0.2)',
+                fill: true
+            }]
+        },
+        options: {
+            responsive: true,
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    max: 100
+                }
+            }
+        }
+    });
+
+    // График сигнала
+    const signalCtx = document.getElementById('signal-chart').getContext('2d');
+    charts.signal = new Chart(signalCtx, {
+        type: 'line',
+        data: {
+            labels: [],
+            datasets: [{
+                label: 'Сигнал (%)',
+                data: [],
+                borderColor: 'rgb(153, 102, 255)',
+                backgroundColor: 'rgba(153, 102, 255, 0.2)',
+                fill: true
+            }]
+        },
+        options: {
+            responsive: true,
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    max: 100
+                }
+            }
+        }
+    });
+}
+
+// Обновление статистики
+function updateStats(telemetry) {
+    try {
+        const drones = Object.values(telemetry);
+        const activeDrones = drones.filter(d => d.status === 'active').length;
+        
+        const avgAltitude = drones.reduce((sum, d) => sum + (d.altitude || 0), 0) / drones.length || 0;
+        const avgSpeed = drones.reduce((sum, d) => sum + (d.speed || 0), 0) / drones.length || 0;
+        const avgBattery = drones.reduce((sum, d) => sum + (d.battery || 0), 0) / drones.length || 0;
+
+        document.getElementById('active-drones-count').textContent = activeDrones;
+        document.getElementById('avg-altitude').textContent = avgAltitude.toFixed(1) + ' м';
+        document.getElementById('avg-speed').textContent = avgSpeed.toFixed(1) + ' м/с';
+        document.getElementById('avg-battery').textContent = avgBattery.toFixed(1) + '%';
+    } catch (error) {
+        console.error('Ошибка при обновлении статистики:', error);
+    }
+}
+
+// Обновление графиков
+function updateCharts(telemetry) {
+    try {
+        const now = new Date().toLocaleTimeString();
+        
+        // Обновление графика высоты и скорости
+        charts.altitudeSpeed.data.labels.push(now);
+        charts.altitudeSpeed.data.datasets[0].data.push(
+            Object.values(telemetry).reduce((sum, d) => sum + (d.altitude || 0), 0) / Object.keys(telemetry).length || 0
+        );
+        charts.altitudeSpeed.data.datasets[1].data.push(
+            Object.values(telemetry).reduce((sum, d) => sum + (d.speed || 0), 0) / Object.keys(telemetry).length || 0
+        );
+        
+        // Обновление графика батареи
+        charts.battery.data.labels.push(now);
+        charts.battery.data.datasets[0].data.push(
+            Object.values(telemetry).reduce((sum, d) => sum + (d.battery || 0), 0) / Object.keys(telemetry).length || 0
+        );
+        
+        // Обновление графика сигнала
+        charts.signal.data.labels.push(now);
+        charts.signal.data.datasets[0].data.push(
+            Object.values(telemetry).reduce((sum, d) => sum + (d.signal_strength || 0), 0) / Object.keys(telemetry).length || 0
+        );
+
+        // Ограничение количества точек на графиках
+        const maxPoints = 20;
+        if (charts.altitudeSpeed.data.labels.length > maxPoints) {
+            charts.altitudeSpeed.data.labels.shift();
+            charts.altitudeSpeed.data.datasets.forEach(dataset => dataset.data.shift());
+        }
+        if (charts.battery.data.labels.length > maxPoints) {
+            charts.battery.data.labels.shift();
+            charts.battery.data.datasets[0].data.shift();
+        }
+        if (charts.signal.data.labels.length > maxPoints) {
+            charts.signal.data.labels.shift();
+            charts.signal.data.datasets[0].data.shift();
+        }
+
+        // Обновление графиков
+        charts.altitudeSpeed.update();
+        charts.battery.update();
+        charts.signal.update();
+    } catch (error) {
+        console.error('Ошибка при обновлении графиков:', error);
+    }
+}
+
+// Обновление траекторий
+function updateTrajectories(telemetry) {
+    try {
+        for (const [droneId, data] of Object.entries(telemetry)) {
+            if (!data.latitude || !data.longitude) continue;
+            
+            if (!trajectoryLayers[droneId]) {
+                trajectoryLayers[droneId] = L.polyline([], {
+                    color: getRandomColor(),
+                    weight: 2
+                }).addTo(trajectoryMap);
+            }
+            
+            const latlng = [data.latitude, data.longitude];
+            trajectoryLayers[droneId].addLatLng(latlng);
+        }
+    } catch (error) {
+        console.error('Ошибка при обновлении траекторий:', error);
+    }
+}
+
+// Получение случайного цвета для траектории
+function getRandomColor() {
+    const letters = '0123456789ABCDEF';
+    let color = '#';
+    for (let i = 0; i < 6; i++) {
+        color += letters[Math.floor(Math.random() * 16)];
+    }
+    return color;
+}
+
+// Обновление данных
+async function updateData() {
+    try {
+        const response = await fetch('/api/telemetry');
+        if (response.ok) {
+            const telemetry = await response.json();
+            updateStats(telemetry);
+            updateCharts(telemetry);
+            updateTrajectories(telemetry);
+            document.getElementById('analytics-error')?.remove();
+        } else {
+            showAnalyticsError('Ошибка при получении данных: ' + response.statusText);
+            if (updateInterval) {
+                clearInterval(updateInterval);
+                updateInterval = null;
+            }
+        }
+    } catch (error) {
+        showAnalyticsError('Ошибка при обновлении данных: ' + error);
+        if (updateInterval) {
+            clearInterval(updateInterval);
+            updateInterval = null;
+        }
+    }
+}
+
+function showAnalyticsError(msg) {
+    let err = document.getElementById('analytics-error');
+    if (!err) {
+        err = document.createElement('div');
+        err.id = 'analytics-error';
+        err.className = 'alert alert-danger mt-3';
+        document.querySelector('.container').prepend(err);
+    }
+    err.textContent = msg;
+}
+
+// Инициализация
+document.addEventListener('DOMContentLoaded', () => {
+    try {
+        initMap();
+        initCharts();
+        updateData();
+        updateInterval = setInterval(updateData, 1000);
+    } catch (error) {
+        console.error('Ошибка при инициализации:', error);
+    }
+});
+</script>
+{% endblock %} 

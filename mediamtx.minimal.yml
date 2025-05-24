@@ -1,0 +1,20 @@
+logLevel: info
+logDestinations: [stdout, file]
+logFile: mediamtx.log
+
+api: yes
+apiAddress: :9997
+
+metrics: yes
+metricsAddress: :9998
+
+pathDefaults:
+  source: publisher
+  runOnReadyRestart: yes
+  overridePublisher: yes
+
+paths:
+  all_others:
+    source: publisher
+    runOnReadyRestart: yes
+    overridePublisher: yes
