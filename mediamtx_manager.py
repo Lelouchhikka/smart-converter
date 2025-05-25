@@ -132,7 +132,6 @@ class MediaMTXManager:
                 print("[MediaMTX]", line.strip())
 
     def add_drone(self, drone_id: str, config: dict):
-        """Добавляет новый дрон в мониторинг"""
         if drone_id in self.monitor.active_streams:
             raise ValueError(f"Дрон с ID {drone_id} уже существует")
         
@@ -144,7 +143,6 @@ class MediaMTXManager:
         
         self.monitor.telemetry_data[drone_id] = config["telemetry"]
         
-        # Добавляем начальное событие
         self.monitor._last_events.append({
             "type": "stream_created",
             "stream": drone_id,

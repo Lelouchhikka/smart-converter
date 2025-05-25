@@ -97,12 +97,7 @@ class StreamMonitor:
                         self.event_queue.put(("stream_ended", stream))
                     elif old_publishers == 0 and stream.publishers > 0:
                         self.event_queue.put(("stream_restarted", stream))
-            # --- ОТМЕНЯЕМ УДАЛЕНИЕ ДРОНОВ, которых нет в RTMP/RTSP потоках ---
-            # for path_name in list(self.streams.keys()):
-            #     if path_name not in current_streams:
-            #         stream = self.streams.pop(path_name)
-            #         self.telemetry_simulator.remove_drone(path_name)
-            #         self.event_queue.put(("stream_removed", stream))
+
         except Exception as e:
             logger.error(f"Ошибка при обновлении потоков: {str(e)}")
             logger.debug(f"Ответ API: {response.text if 'response' in locals() else 'Нет ответа'}")
@@ -117,19 +112,15 @@ class StreamMonitor:
         return events
         
     def get_telemetry(self, stream_id: str) -> Optional[dict]:
-        """Получает телеметрию для конкретного потока"""
         return self.telemetry_simulator.get_telemetry(stream_id)
         
     def get_all_telemetry(self) -> Dict[str, dict]:
-        """Получает телеметрию всех потоков"""
         return self.telemetry_simulator.get_all_telemetry()
 
     def add_drone(self, drone_id: str, config: dict):
-        """Добавляет новый дрон в мониторинг"""
         try:
             if drone_id in self.streams:
                 raise ValueError(f"Дрон с ID {drone_id} уже существует")
-            # Проверяем наличие обязательных полей
             required_fields = ["source_type", "rtsp_url", "status"]
             missing_fields = [field for field in required_fields if field not in config]
             if missing_fields:
@@ -147,14 +138,12 @@ class StreamMonitor:
                 bitrate=config.get("bitrate"),
                 resolution=config.get("resolution")
             )
-            # Координаты Алматы по умолчанию
             initial_lat = config.get("initial_position", {}).get("lat", 43.238949)
             initial_lon = config.get("initial_position", {}).get("lon", 76.889709)
             self.telemetry_simulator.add_drone(drone_id, initial_lat, initial_lon)
             self.event_queue.put(("stream_created", self.streams[drone_id]))
             self.telemetry_history[drone_id] = []
             
-            # Настраиваем конвертер для дрона
             try:
                 response = requests.post(
                     f"{self.api_url}/v3/config/paths/patch/{drone_id}",
@@ -174,7 +163,6 @@ class StreamMonitor:
             raise
 
     def get_telemetry_history(self, drone_id: str, limit: int = 100) -> List[Dict]:
-        """Получает историю телеметрии для конкретного дрона"""
         if drone_id not in self.telemetry_history:
             return []
         return self.telemetry_history[drone_id][-limit:]
@@ -184,7 +172,6 @@ class StreamMonitor:
         for drone_id in self.streams:
             last_pos = session.query(PositionDB).filter(PositionDB.drone_id == drone_id).order_by(PositionDB.timestamp.desc()).first()
             if last_pos:
-                # Устанавливаем позицию дрона в эмуляторе
                 if drone_id not in self.telemetry_simulator.drones:
                     self.telemetry_simulator.add_drone(drone_id, last_pos.lat, last_pos.lon)
                 self.telemetry_simulator.drones[drone_id].latitude = last_pos.lat
@@ -219,26 +206,25 @@ class StreamMonitor:
                 stream.resolution = data.get("resolution")
                 stream.status = data.get("status", "active")
                 stream.last_seen = datetime.now()
-                # Сохраняем в историю
+                
                 if stream_id not in self.telemetry_history:
                     self.telemetry_history[stream_id] = []
                 self.telemetry_history[stream_id].append({
                     **data,
                     'timestamp': datetime.now().isoformat()
                 })
-                # Ограничиваем размер истории
+                
                 if len(self.telemetry_history[stream_id]) > self.max_history_size:
                     self.telemetry_history[stream_id] = self.telemetry_history[stream_id][-self.max_history_size:]
-                # Отправляем событие
+                
                 if stream.status == "active":
                     self.event_queue.put(("stream_started", stream))
                 else:
                     self.event_queue.put(("stream_ended", stream))
-                # Сохраняем позицию в БД
+                
                 self.save_position_to_db(stream_id, data)
 
     def update_events(self, events):
-        """Обновляет список событий"""
         self.event_queue = Queue()
         for event in events:
             self.event_queue.put(event) 
