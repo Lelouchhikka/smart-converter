@@ -2,11 +2,40 @@ logLevel: info
 logDestinations: [stdout, file]
 logFile: mediamtx.log
 
+# RTMP settings
+rtmp: yes
+rtmpAddress: :1935
+
+# RTSP settings
+rtsp: yes
+rtspAddress: :8554
+
 api: yes
 apiAddress: :9997
 
 metrics: yes
 metricsAddress: :9998
+
+# Enable reading streams with the HLS protocol.
+hls: yes
+# Address of the HLS listener.
+hlsAddress: :8888
+# Enable TLS/HTTPS on the HLS server.
+hlsEncryption: no
+# Value of the Access-Control-Allow-Origin header provided in every HTTP response.
+hlsAllowOrigin: '*'
+# By default, HLS is generated only when requested by a user.
+hlsAlwaysRemux: yes
+# Variant of the HLS protocol to use.
+hlsVariant: mpegts
+# Number of HLS segments to keep on the server.
+hlsSegmentCount: 15
+# Minimum duration of each segment.
+hlsSegmentDuration: 2s
+# Maximum size of each segment.
+hlsSegmentMaxSize: 50M
+# The muxer will be closed when there are no reader requests and this amount of time has passed.
+hlsMuxerCloseAfter: 60s
 
 pathDefaults:
   source: publisher

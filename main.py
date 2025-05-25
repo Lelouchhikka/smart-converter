@@ -84,10 +84,13 @@ def main() -> None:
                 await stream_monitor.start()
                 
                 # Запускаем процессы FFmpeg для существующих потоков при старте
-                print("Загрузка существующих потоков из БД и запуск FFmpeg...")
+                print("Загрузка существующих потоков из БД и запуск FFmpeg...\n")
                 streams = await get_streams_from_db()
                 print(f"Найдено {len(streams)} потоков в БД.")
                 
+                # Добавляем аутентификацию для MediaMTX API
+                auth = ("admin", "admin")
+
                 for stream in streams:
                     stream_key = stream.get("stream_key")
                     source_type = stream.get("source_type")
@@ -101,31 +104,50 @@ def main() -> None:
                     # Обновляем конфигурацию потока в MediaMTX при старте
                     try:
                         stream_key_safe = stream_key.replace('/', '_')
+                        
+                        # Минимальная конфигурация для MediaMTX: только источник publisher
+                        # Временно убираем секцию outputs
                         stream_config = {
-                            "source": "publisher",
-                            "rtspTransport": "tcp",
-                            "rtspAnyPort": True,
+                            "name": stream_key_safe, # Добавляем имя пути в тело запроса
+                            "source": "publisher", # Источник входящего RTMP потока
+                            # outputs секция временно удалена
+                            # Опционально можно добавить keepAlive: true для publisher source
+                            # "keepAlive": True 
                         }
 
-                        # Проверяем существование пути в MediaMTX
+                        # Проверяем существование пути в MediaMTX с аутентификацией
                         async with httpx.AsyncClient() as client:
                             check_url = f"http://localhost:9997/v3/config/paths/get/{stream_key_safe}"
-                            response = await client.get(check_url)
                             
-                            if response.status_code == 404:
-                                # Путь не существует, создаем новый
-                                add_url = f"http://localhost:9997/v3/config/paths/add/{stream_key_safe}"
-                                response = await client.post(add_url, json=stream_config)
-                                response.raise_for_status()
-                                print(f"Добавлен новый путь в MediaMTX для потока {stream_key}")
-                            else:
-                                # Путь существует, обновляем конфигурацию
+                            try:
+                                response = await client.get(check_url, auth=auth)
+                                response.raise_for_status() # Проверка статуса ответа
+                                
+                                # Путь существует, обновляем конфигурацию с аутентификацией
                                 patch_url = f"http://localhost:9997/v3/config/paths/patch/{stream_key_safe}"
-                                response = await client.patch(patch_url, json=stream_config)
+                                response = await client.patch(patch_url, json=stream_config, auth=auth)
                                 response.raise_for_status()
                                 print(f"Обновлена конфигурация MediaMTX для потока {stream_key}")
 
-                        # Обновляем статус в БД
+                            except httpx.HTTPStatusError as e:
+                                if e.response.status_code == 404:
+                                    # Путь не существует, создаем новый с аутентификацией
+                                    add_url = f"http://localhost:9997/v3/config/paths/add/{stream_key_safe}"
+                                    response = await client.post(add_url, json=stream_config, auth=auth)
+                                    # Логируем тело ответа при 400 ошибке
+                                    if response.status_code == 400:
+                                        print(f"Получена ошибка 400 при добавлении пути {stream_key_safe} в MediaMTX. Тело ответа: {response.text}")
+                                    response.raise_for_status()
+                                    print(f"Добавлен новый путь в MediaMTX для потока {stream_key}")
+                                else:
+                                    # Другие ошибки HTTP статуса
+                                    # Логируем тело ответа для других ошибок HTTP статуса
+                                    print(f"Получена HTTP ошибка {e.response.status_code} при восстановлении потока {stream_key_safe}. Тело ответа: {e.response.text}")
+                                    raise e # Переподнимаем ошибку для общего обработчика
+
+                        # Обновляем статус в БД - эту логику можно убрать или изменить.
+                        # Статус "active" должен устанавливаться монитором потоков, когда он видит publisher.
+                        # Пока оставим, но имейте в виду, что это может быть не совсем точная логика статуса.
                         session = SessionLocal()
                         try:
                             db_stream = session.query(Drone).filter(Drone.id == stream_key).first()

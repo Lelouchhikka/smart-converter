@@ -160,7 +160,6 @@ class StreamMonitor:
                     f"{self.api_url}/v3/config/paths/patch/{drone_id}",
                     json={
                         "source": "rtmp",
-                        "sourceOnDemand": True,
                         "runOnPublish": f"ffmpeg -i rtsp://localhost:8554/{drone_id} -c copy -f rtsp rtsp://localhost:8554/{drone_id}_converted",
                         "runOnPublishRestart": True
                     }

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, UploadFile, File, WebSocket, status
+from fastapi import APIRouter, HTTPException, UploadFile, File, WebSocket, status, Query
 from typing import Dict, List, Optional
 from datetime import datetime
 import json
@@ -13,6 +13,7 @@ import asyncio
 import httpx
 import aiohttp
 from loguru import logger # Import loguru
+from sqlalchemy import delete
 
 # Настройка логгера (loguru typically requires minimal setup for basic use,
 # it configures a default stderr handler. For file logging or advanced config,
@@ -46,6 +47,11 @@ class DroneData(BaseModel):
     rtmp_url: str
     rtsp_url: str
     initial_position: Dict[str, float]
+
+class StreamRequest(BaseModel):
+    stream_key: str
+    source_type: str
+    file_path: Optional[str] = None
 
 def set_stream_monitor(monitor):
     global _stream_monitor
@@ -157,32 +163,57 @@ async def get_trajectories():
     return trajectories
 
 @router.post("/streams")
-async def add_stream(stream_key: str, source_type: str, file_path: Optional[str] = None):
+async def add_stream(stream_request: StreamRequest):
     """Добавляет новый поток в MediaMTX."""
     try:
+        stream_key = stream_request.stream_key
+        source_type = stream_request.source_type
+        file_path = stream_request.file_path
+        
         stream_key_safe = stream_key.replace('/', '_')
         
+        # Создаем директории для HLS и загрузок
         hls_dir = os.path.join("static", "hls", stream_key_safe)
+        uploads_dir = os.path.join("uploads")
         os.makedirs(hls_dir, exist_ok=True)
+        os.makedirs(uploads_dir, exist_ok=True)
         
-        stream_config = {
-            "source": "publisher",
-            "rtspTransport": "tcp",
-            "rtspAnyPort": True,
-        }
+        # Динамически формируем stream_config в зависимости от source_type
+        stream_config = {}
+        if source_type in ["file", "rtmp", "camera", "screen"]:
+            stream_config = {
+                "name": stream_key_safe,
+                "source": "publisher"
+            }
+        elif source_type == "rtmp":
+            stream_config = {
+                "source": "publisher"
+            }
+        else:
+            logger.warning(f"Unsupported source type '{source_type}' for MediaMTX configuration. Using default publisher config.")
+            stream_config = {
+                "name": stream_key_safe,
+                "source": "publisher"
+            }
+
+        # Добавляем аутентификацию для MediaMTX API
+        auth = aiohttp.BasicAuth("admin", "admin")
 
         mediamtx_path_url = f"http://localhost:9997/v3/config/paths/get/{stream_key_safe}"
         async with aiohttp.ClientSession() as session:
-            async with session.get(mediamtx_path_url) as response:
+            async with session.get(mediamtx_path_url, auth=auth) as response:
                 if response.status == 200:
                     logger.info(f"Path {stream_key_safe} already exists in MediaMTX, patching configuration.")
+                    logger.debug(f"Patching with config: {stream_config}")
                     async with session.patch(
                         f"http://localhost:9997/v3/config/paths/patch/{stream_key_safe}",
-                        json=stream_config
+                        json=stream_config,
+                        auth=auth
                     ) as patch_response:
                         if patch_response.status != 200:
                             error_text = await patch_response.text()
                             logger.error(f"Failed to patch stream configuration {stream_key}: {error_text}")
+                            logger.error(f"MediaMTX API response body for patch error: {error_text}")
                             raise HTTPException(
                                 status_code=500,
                                 detail=f"Failed to patch stream configuration: {error_text}"
@@ -191,13 +222,17 @@ async def add_stream(stream_key: str, source_type: str, file_path: Optional[str]
 
                 elif response.status == 404:
                     logger.info(f"Path {stream_key_safe} not found in MediaMTX, adding configuration.")
+                    logger.debug(f"Adding with config: {stream_config}")
                     async with session.post(
                         f"http://localhost:9997/v3/config/paths/add/{stream_key_safe}",
-                        json=stream_config
+                        json=stream_config,
+                        auth=auth
                     ) as add_response:
                         if add_response.status != 200:
                             error_text = await add_response.text()
                             logger.error(f"Failed to add stream configuration {stream_key}: {error_text}")
+                            logger.error(f"MediaMTX API response body for add error: {error_text}")
+                            logger.error(f"Request config: {stream_config}")
                             raise HTTPException(
                                 status_code=500,
                                 detail=f"Failed to add stream configuration: {error_text}"
@@ -213,7 +248,7 @@ async def add_stream(stream_key: str, source_type: str, file_path: Optional[str]
         return {"status": "success", "message": "Stream configured successfully"}
 
     except Exception as e:
-        logger.exception(f"Error configuring stream {stream_key}") # loguru automatically captures traceback
+        logger.exception(f"Error configuring stream {stream_key}")
         raise HTTPException(
             status_code=500,
             detail=f"Error configuring stream: {str(e)}"
@@ -223,33 +258,110 @@ async def add_stream(stream_key: str, source_type: str, file_path: Optional[str]
 async def delete_stream(stream_key: str):
     """Удаляет поток"""
     if not _stream_monitor:
+        logger.error("Stream monitor not initialized")
         raise HTTPException(status_code=500, detail="Stream monitor not initialized")
+    
     try:
-        escaped_stream_key = stream_key.replace('/', '_')
-        mediamtx_url = f"http://localhost:9997/v3/paths/delete/{escaped_stream_key}"
-        async with httpx.AsyncClient() as client:
-            response = await client.delete(mediamtx_url)
-            response.raise_for_status()
+        stream_key_safe = stream_key.replace('/', '_')
+        logger.info(f"Начинаем удаление потока {stream_key} (безопасный ключ: {stream_key_safe})")
+        
+        # Удаляем поток из MediaMTX
+        try:
+            async with httpx.AsyncClient() as client:
+                # Сначала проверяем существование потока
+                check_response = await client.get(
+                    f"{_stream_monitor.mediamtx_api_url}/v3/paths/get/{stream_key_safe}",
+                    auth=("admin", "admin")
+                )
+                
+                if check_response.status_code == 404:
+                    logger.warning(f"Поток {stream_key} не найден в MediaMTX")
+                else:
+                    # Если поток существует, удаляем его
+                    delete_response = await client.delete(
+                        f"{_stream_monitor.mediamtx_api_url}/v3/config/paths/delete/{stream_key_safe}",
+                        auth=("admin", "admin")
+                    )
+                    
+                    if delete_response.status_code != 200:
+                        logger.error(f"Ошибка при удалении потока из MediaMTX: {delete_response.status_code} - {delete_response.text}")
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"Ошибка при удалении потока из MediaMTX: {delete_response.text}"
+                        )
+                    logger.info(f"Поток {stream_key} успешно удален из MediaMTX")
+        except httpx.RequestError as e:
+            logger.error(f"Ошибка при обращении к MediaMTX API: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Ошибка при обращении к MediaMTX API: {str(e)}"
+            )
 
-        await delete_stream_from_db(stream_key)
+        # Удаляем поток из базы данных
+        try:
+            session = SessionLocal()
+            try:
+                # Удаляем телеметрию
+                session.execute(
+                    delete(PositionDB).where(PositionDB.drone_id == stream_key)
+                )
+                logger.info(f"Телеметрия для потока {stream_key} удалена из БД")
+                
+                # Удаляем поток
+                session.execute(
+                    delete(Drone).where(Drone.id == stream_key)
+                )
+                logger.info(f"Поток {stream_key} удален из БД")
+                
+                session.commit()
+            except Exception as e:
+                session.rollback()
+                raise e
+            finally:
+                session.close()
+        except Exception as e:
+            logger.error(f"Ошибка при удалении данных из БД: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Ошибка при удалении данных из БД: {str(e)}"
+            )
 
-        return {"message": f"Stream {stream_key} deleted successfully from MediaMTX and DB"}
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 404:
-            logger.warning(f"Stream {stream_key} not found in MediaMTX, deleting from DB only.")
-            await delete_stream_from_db(stream_key)
-            return {"message": f"Stream {stream_key} not found in MediaMTX, deleted from DB."}
-        else:
-            logger.error(f"Error deleting stream {stream_key} from MediaMTX: {e}")
-            raise HTTPException(status_code=e.response.status_code, detail=f"Error deleting stream from MediaMTX: {e}")
-    except httpx.RequestError as e:
-        logger.error(f"Error connecting to MediaMTX API while deleting {stream_key}: {e}")
-        await delete_stream_from_db(stream_key) # Attempt DB delete even if MediaMTX fails
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"Could not connect to MediaMTX API, but deleted from DB: {e}")
+        # Очищаем кэш телеметрии
+        try:
+            if stream_key in _stream_monitor.telemetry_data:
+                del _stream_monitor.telemetry_data[stream_key]
+            if stream_key in _stream_monitor.telemetry_history:
+                del _stream_monitor.telemetry_history[stream_key]
+            logger.info(f"Кэш телеметрии для потока {stream_key} очищен")
+        except Exception as e:
+            logger.error(f"Ошибка при очистке кэша телеметрии: {str(e)}")
+
+        # Останавливаем FFmpeg процесс
+        try:
+            if stream_key in ffmpeg_processes:
+                process = ffmpeg_processes.pop(stream_key)
+                if process and process.returncode is None:
+                    process.terminate()
+                    try:
+                        await asyncio.wait_for(process.wait(), timeout=5.0)
+                        logger.info(f"FFmpeg процесс для потока {stream_key} остановлен")
+                    except asyncio.TimeoutError:
+                        process.kill()
+                        await process.wait()
+                        logger.info(f"FFmpeg процесс для потока {stream_key} принудительно остановлен")
+        except Exception as e:
+            logger.error(f"Ошибка при остановке FFmpeg процесса: {str(e)}")
+
+        return {"message": f"Поток {stream_key} успешно удален"}
+
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.exception(f"Unexpected error deleting stream {stream_key}")
-        raise HTTPException(status_code=500, detail=f"Unexpected error deleting stream: {e}")
-
+        logger.exception(f"Непредвиденная ошибка при удалении потока {stream_key}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Непредвиденная ошибка при удалении потока: {str(e)}"
+        )
 
 @router.get("/streams/{stream_key}")
 async def get_stream(stream_key: str):
@@ -274,61 +386,58 @@ async def get_stream(stream_key: str):
 
 @router.get("/streams", response_model=List[StreamResponse])
 async def list_streams() -> List[Dict]:
-    """Получает список всех потоков из БД и их текущий статус"""
-    logger.info("Received request for /api/streams")
+    """Получает список всех дронов из БД и их текущий статус"""
+    logger.info("Получение списка дронов из БД")
     try:
-        streams_from_db = await get_streams_from_db()
-        logger.info(f"Retrieved {len(streams_from_db)} streams from DB.")
+        session = SessionLocal()
+        streams_list = []
         
-        streams_with_status = []
+        # Получаем все дроны из БД
+        drones = session.query(Drone).all()
+        logger.info(f"Найдено {len(drones)} дронов в БД")
+        
+        # Получаем активные потоки из MediaMTX для проверки статуса
         active_mediamtx_streams = _stream_monitor.get_active_streams() if _stream_monitor else []
-        logger.info(f"Retrieved {len(active_mediamtx_streams)} active streams from MediaMTX monitor.")
         active_mediamtx_streams_dict = {stream.path: stream for stream in active_mediamtx_streams}
-
-        for stream_db in streams_from_db:
-            stream_key = stream_db.get("stream_key")
-            if not stream_key:
-                logger.warning(f"Stream object from DB missing stream_key: {stream_db}")
-                continue 
-
+        
+        for drone in drones:
+            stream_key = drone.id
             stream_key_safe = stream_key.replace('/', '_')
-            status = "inactive"
+            
+            # Проверяем статус в MediaMTX
             mediamtx_data = active_mediamtx_streams_dict.get(stream_key_safe)
-            hls_url = None
-            rtsp_url = None # Will be taken from DB or MediaMTX
-
-            if mediamtx_data:
-                status = mediamtx_data.status
-                rtsp_url = mediamtx_data.rtsp_url # Prefer live RTSP URL from MediaMTX
-                # HLS URL is typically constructed based on stream key and MediaMTX config
-                hls_url = f"/static/hls/{stream_key_safe}/stream.m3u8" 
-            else:
-                # If not active in MediaMTX, use HLS URL from DB (if stored) or construct it
-                hls_url = stream_db.get("hls_url") or f"/static/hls/{stream_key_safe}/stream.m3u8"
-
-
-            stream_data_for_response = {
+            status = mediamtx_data.status if mediamtx_data else "inactive"
+            
+            # Обновляем статус в БД, если он изменился
+            if drone.status != status:
+                drone.status = status
+                session.commit()
+            
+            # Формируем данные для ответа
+            stream_data = {
                 "stream_key": stream_key,
-                "rtmp_url": stream_db.get("rtmp_url", ""),
-                # Use MediaMTX RTSP if available, otherwise fallback to DB RTSP
-                "rtsp_url": rtsp_url or stream_db.get("rtsp_url", ""),
-                "rtsp_converted_url": rtsp_url or stream_db.get("rtsp_url", ""), # Assuming same for now
-                "hls_url": hls_url,
+                "rtmp_url": drone.rtmp_url,
+                "rtsp_url": drone.rtsp_url,
+                "rtsp_converted_url": drone.rtsp_url,  # Используем тот же URL
+                "hls_url": f"/static/hls/{stream_key_safe}/stream.m3u8",
                 "status": status,
-                "description": stream_db.get("description", ""),
+                "description": getattr(drone, 'description', None)
             }
-            streams_with_status.append(stream_data_for_response)
-            logger.debug(f"Processed stream {stream_key}, status: {status}, HLS: {hls_url}")
-
-        logger.info(f"Returning {len(streams_with_status)} streams to client.")
-        return streams_with_status
-
+            
+            streams_list.append(stream_data)
+            logger.debug(f"Обработан дрон {stream_key}, статус: {status}")
+        
+        logger.info(f"Возвращаем {len(streams_list)} дронов клиенту")
+        return streams_list
+        
     except Exception as e:
-        logger.exception("Error in list_streams") # loguru automatically captures traceback
+        logger.exception("Ошибка при получении списка дронов")
         raise HTTPException(
             status_code=500,
-            detail=f"Internal Server Error while listing streams: {str(e)}"
+            detail=f"Внутренняя ошибка сервера при получении списка дронов: {str(e)}"
         )
+    finally:
+        session.close()
 
 @router.get("/health")
 async def health_check():
@@ -506,17 +615,19 @@ async def websocket_endpoint(websocket: WebSocket, stream_key: str):
     ffmpeg_process = None
     
     try:
+        # Создаем директории для HLS и загрузок
+        stream_key_safe = stream_key.replace('/', '_')
+        hls_dir = os.path.join("static", "hls", stream_key_safe)
+        uploads_dir = os.path.join("uploads")
+        os.makedirs(hls_dir, exist_ok=True)
+        os.makedirs(uploads_dir, exist_ok=True)
+
         data = await websocket.receive_json()
         logger.info(f"WS {stream_key}: Received initial data: {data}")
         source_type = data.get("sourceType", "file")
         file_path = data.get("filePath")
         loop_file = data.get("loopFile", True)
         
-        stream_key_safe = stream_key.replace('/', '_')
-        
-        hls_dir = os.path.join("static", "hls", stream_key_safe)
-        os.makedirs(hls_dir, exist_ok=True)
-
         # Save stream info to DB, explicitly passing file_path and loop_file
         await save_stream_to_db(
             stream_key=stream_key,
@@ -524,6 +635,16 @@ async def websocket_endpoint(websocket: WebSocket, stream_key: str):
             file_path=file_path,
             loop_file=loop_file
         )
+
+        # Добавляем поток в симулятор телеметрии, если монитор инициализирован
+        if _stream_monitor:
+            try:
+                # Для файловых потоков у нас нет начальной позиции, используем дефолтную или загружаем последнюю из БД
+                # StreamMonitor.add_drone уже пытается загрузить последнюю позицию из БД
+                _stream_monitor.telemetry_simulator.add_drone(stream_key)
+                logger.info(f"WS {stream_key}: Added stream to telemetry simulator.")
+            except Exception as e:
+                logger.error(f"WS {stream_key}: Error adding stream to telemetry simulator: {e}")
 
         ffmpeg_command = ["ffmpeg", "-hide_banner"]
 
@@ -534,20 +655,40 @@ async def websocket_endpoint(websocket: WebSocket, stream_key: str):
                 await websocket.send_json({"status": "error", "message": "Error: No file path provided."})
                 return
             
-            if not os.path.exists(file_path):
-                logger.error(f"WS {stream_key}: File not found: {file_path}")
-                await websocket.send_json({"status": "error", "message": f"Error: File not found at {file_path}."})
-                await delete_stream_from_db(stream_key)
-                return
-                
+            # Добавляем подробное логирование путей
+            current_dir = os.getcwd()
+            logger.info(f"WS {stream_key}: Current working directory: {current_dir}")
+            logger.info(f"WS {stream_key}: Original file_path: {file_path}")
+            logger.info(f"WS {stream_key}: File basename: {os.path.basename(file_path)}")
+            
+            # Корректно формируем путь к файлу относительно директории 'uploads'
+            # Используем os.path.basename, чтобы исключить любые потенциальные компоненты директории
+            # из пути, сохраненного в БД, и объединяем его с 'uploads'.
+            file_path_for_ffmpeg = os.path.join("uploads", os.path.basename(file_path))
+
+            if not os.path.exists(file_path_for_ffmpeg):
+                 logger.error(f"File not found for stream {stream_key}: {file_path_for_ffmpeg}")
+                 logger.error(f"Current working directory: {os.getcwd()}")
+                 try:
+                     logger.error(f"Contents of uploads directory: {os.listdir('uploads')}")
+                 except FileNotFoundError:
+                     logger.error("Uploads directory not found.")
+                 except Exception as e:
+                     logger.error(f"Error listing uploads directory: {e}")
+
+                 return
+
+            logger.info(f"Using file path for FFmpeg: {file_path_for_ffmpeg}")
+
             if loop_file:
                 ffmpeg_command += ["-stream_loop", "-1"]
-            ffmpeg_command += ["-re", "-i", file_path, "-copyts"]
+            # Используем -re для чтения файла с нативной частотой кадров
+            # -copyts сохраняет исходные временные метки
+            ffmpeg_command += ["-re", "-i", file_path_for_ffmpeg, "-copyts"]
 
         else:
             logger.warning(f"WS {stream_key}: Invalid or unsupported source type '{source_type}'.")
             await websocket.send_json({"status": "error", "message": "Error: Invalid or unsupported source type."})
-            await delete_stream_from_db(stream_key)
             return
 
         rtmp_url = f"rtmp://localhost:1935/{stream_key_safe}"
@@ -568,12 +709,14 @@ async def websocket_endpoint(websocket: WebSocket, stream_key: str):
         logger.info(f"WS {stream_key}: FFmpeg command: {' '.join(ffmpeg_command)}")
         
         try:
+            # Убедимся, что FFmpeg запускается в правильном рабочем каталоге,
+            # чтобы путь 'uploads/...' был корректен.
             ffmpeg_process = await asyncio.create_subprocess_exec(
                 *ffmpeg_command,
                 stdin=subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd='.'
+                cwd='.' # Запускаем FFmpeg в текущем рабочем каталоге
             )
             ffmpeg_processes[stream_key] = ffmpeg_process
             logger.info(f"WS {stream_key}: FFmpeg process started with PID: {ffmpeg_process.pid}")
@@ -582,27 +725,65 @@ async def websocket_endpoint(websocket: WebSocket, stream_key: str):
         except FileNotFoundError:
             logger.error(f"WS {stream_key}: FFmpeg executable not found.")
             await websocket.send_json({"status": "error", "message": "Ошибка: FFmpeg не найден."})
-            await delete_stream_from_db(stream_key)
             return
         except Exception as e:
             logger.error(f"WS {stream_key}: Error starting FFmpeg: {e}")
             await websocket.send_json({"status": "error", "message": f"Ошибка запуска FFmpeg: {e}"})
-            await delete_stream_from_db(stream_key)
             return
 
         async def monitor_ffmpeg_output(p: asyncio.subprocess.Process, ws: WebSocket, sk: str):
             is_active_sent = False
             try:
-                async for line_bytes in p.stderr:
-                    line = line_bytes.decode('utf-8', errors='ignore').strip()
-                    if line:
-                        logger.trace(f"FFmpeg [{sk}]: {line}")
-                        if "frame=" in line and not is_active_sent:
-                            await ws.send_json({
-                                "status": "active",
-                                "message": "Трансляция активна"
-                            })
-                            is_active_sent = True
+                # Чтение stderr и stdout параллельно, чтобы избежать зависания
+                stderr_queue = asyncio.Queue()
+                stdout_queue = asyncio.Queue()
+
+                async def read_stream(stream, queue):
+                    while True:
+                        line = await stream.readline()
+                        if line:
+                            await queue.put(line)
+                        else:
+                            break # EOF
+                
+                stderr_task = asyncio.create_task(read_stream(p.stderr, stderr_queue))
+                stdout_task = asyncio.create_task(read_stream(p.stdout, stdout_queue))
+
+                while True:
+                    # Проверяем наличие вывода в обеих очередях с небольшим таймаутом
+                    try:
+                        line_bytes = await asyncio.wait_for(stderr_queue.get(), timeout=0.1)
+                        line = line_bytes.decode('utf-8', errors='ignore').strip()
+                        if line:
+                            logger.trace(f"FFmpeg ERR [{sk}]: {line}")
+                            if "frame=" in line and not is_active_sent:
+                                await ws.send_json({
+                                    "status": "active",
+                                    "message": "Трансляция активна"
+                                })
+                                is_active_sent = True
+                    except asyncio.TimeoutError:
+                        pass # Нет новых данных в stderr, проверяем stdout
+
+                    try:
+                        line_bytes = await asyncio.wait_for(stdout_queue.get(), timeout=0.1)
+                        line = line_bytes.decode('utf-8', errors='ignore').strip()
+                        if line:
+                            logger.trace(f"FFmpeg OUT [{sk}]: {line}")
+                    except asyncio.TimeoutError:
+                        pass # Нет новых данных в stdout
+
+                    # Проверяем, завершился ли процесс
+                    if p.returncode is not None:
+                         # Опустошаем очереди перед выходом, чтобы не потерять последние сообщения
+                         while not stderr_queue.empty():
+                             line = stderr_queue.get_nowait().decode('utf-8', errors='ignore').strip()
+                             if line: logger.trace(f"FFmpeg ERR [{sk}] (flush): {line}")
+                         while not stdout_queue.empty():
+                             line = stdout_queue.get_nowait().decode('utf-8', errors='ignore').strip()
+                             if line: logger.trace(f"FFmpeg OUT [{sk}] (flush): {line}")
+                         break
+
             except asyncio.CancelledError:
                 logger.info(f"FFmpeg output monitoring for {sk} cancelled.")
             except Exception as e_mon:
@@ -612,32 +793,18 @@ async def websocket_endpoint(websocket: WebSocket, stream_key: str):
                         await ws.send_json({"status": "error", "message": f"Ошибка мониторинга FFmpeg: {e_mon}"})
                     except: pass
             finally:
+                # Отменяем задачи чтения стримов при завершении мониторинга
+                stderr_task.cancel()
+                stdout_task.cancel()
+                await asyncio.gather(stderr_task, stdout_task, return_exceptions=True)
                 logger.info(f"FFmpeg output monitoring stopped for {sk}")
 
         monitor_task = asyncio.create_task(monitor_ffmpeg_output(ffmpeg_process, websocket, stream_key))
 
-        while ffmpeg_process.returncode is None:
-            try:
-                await asyncio.sleep(1)
-            except asyncio.TimeoutError:
-                pass
-            except Exception as ws_rx_err:
-                logger.info(f"WS {stream_key}: WebSocket receive error or closed by client: {ws_rx_err}")
-                break
-
+        # Ждем завершения процесса FFmpeg (уже не в цикле)
         await ffmpeg_process.wait()
         return_code = ffmpeg_process.returncode
         logger.info(f"WS {stream_key}: FFmpeg process finished with return code: {return_code}")
-
-        # Attempt to read stderr if process failed
-        if return_code != 0 and ffmpeg_process.stderr:
-            try:
-                stderr_output = await asyncio.wait_for(ffmpeg_process.stderr.read(), timeout=5.0)
-                logger.error(f"WS {stream_key}: FFmpeg process exited with error code {return_code}. Stderr:\n{stderr_output.decode(errors='ignore')}")
-            except asyncio.TimeoutError:
-                logger.error(f"WS {stream_key}: FFmpeg process exited with error code {return_code}, but failed to read stderr within timeout.")
-            except Exception as e_read_err:
-                logger.error(f"WS {stream_key}: Error reading FFmpeg stderr after process exit: {e_read_err}")
 
         if return_code != 0 and return_code is not None:
             if websocket.client_state != 4:
@@ -747,28 +914,51 @@ async def save_stream_to_db(stream_key: str, source_type: str, file_path: str, l
         session.close()
 
 async def get_streams_from_db() -> List[Dict]:
-    logger.info("Getting streams from DB")
+    """Получает список всех дронов из БД"""
+    logger.info("Получение дронов из БД")
     session = SessionLocal()
     streams_list = []
     try:
-        streams = session.query(Drone).all()
-        streams_list = [
-            {
-                "stream_key": stream.id,
-                "rtmp_url": stream.rtmp_url,
-                "rtsp_url": stream.rtsp_url,
-                "source_type": stream.source_type,
-                "status": stream.status,
-                "hls_url": f"/static/hls/{stream.id.replace('/', '_')}/stream.m3u8",
-                "description": getattr(stream, 'description', None),
-                "file_path": stream.file_path,
-                "loop_file": stream.loop_file
+        drones = session.query(Drone).all()
+        streams_list = []
+        
+        # Получаем активные потоки из MediaMTX для проверки статуса
+        active_mediamtx_streams = _stream_monitor.get_active_streams() if _stream_monitor else []
+        active_mediamtx_streams_dict = {stream.path: stream for stream in active_mediamtx_streams}
+        
+        for drone in drones:
+            stream_key = drone.id
+            stream_key_safe = stream_key.replace('/', '_')
+            
+            # Проверяем статус в MediaMTX
+            mediamtx_data = active_mediamtx_streams_dict.get(stream_key_safe)
+            status = mediamtx_data.status if mediamtx_data else "inactive"
+            
+            # Обновляем статус в БД, если он изменился
+            if drone.status != status:
+                drone.status = status
+                session.commit()
+            
+            # Формируем данные для ответа
+            stream_data = {
+                "stream_key": stream_key,
+                "rtmp_url": drone.rtmp_url,
+                "rtsp_url": drone.rtsp_url,
+                "rtsp_converted_url": drone.rtsp_url,  # Используем тот же URL
+                "hls_url": f"/static/hls/{stream_key_safe}/stream.m3u8",
+                "status": status,
+                "description": getattr(drone, 'description', None),
+                "source_type": drone.source_type,  # Добавляем source_type
+                "file_path": drone.file_path,      # Добавляем file_path
+                "loop_file": drone.loop_file       # Добавляем loop_file
             }
-            for stream in streams
-        ]
-        logger.info(f"Retrieved {len(streams_list)} streams from DB.")
+            
+            streams_list.append(stream_data)
+            logger.debug(f"Обработан дрон {stream_key}, статус: {status}")
+        
+        logger.info(f"Получено {len(streams_list)} дронов из БД")
     except Exception as e:
-        logger.exception("Error getting streams from DB")
+        logger.exception("Ошибка при получении дронов из БД")
     finally:
         session.close()
     return streams_list
@@ -817,12 +1007,34 @@ async def _start_ffmpeg_publication_process(
         else:
             ffmpeg_command += ["-f", "x11grab", "-framerate", "30", "-i", ":0.0"]
     elif source_type == "file":
-        if not file_path or not os.path.exists(file_path):
-             logger.error(f"File path not provided or file not found for stream {stream_key}: {file_path}")
-             return 
+        if not file_path:
+             logger.error(f"File path not provided for stream {stream_key}")
+             return
+
+        # Корректно формируем путь к файлу относительно директории 'uploads'
+        # Используем os.path.basename, чтобы исключить любые потенциальные компоненты директории
+        # из пути, сохраненного в БД, и объединяем его с 'uploads'.
+        file_path_for_ffmpeg = os.path.join("uploads", os.path.basename(file_path))
+
+        if not os.path.exists(file_path_for_ffmpeg):
+             logger.error(f"File not found for stream {stream_key}: {file_path_for_ffmpeg}")
+             logger.error(f"Current working directory: {os.getcwd()}")
+             try:
+                 logger.error(f"Contents of uploads directory: {os.listdir('uploads')}")
+             except FileNotFoundError:
+                 logger.error("Uploads directory not found.")
+             except Exception as e:
+                 logger.error(f"Error listing uploads directory: {e}")
+
+             return
+
+        logger.info(f"Using file path for FFmpeg: {file_path_for_ffmpeg}")
+
         if loop_file:
             ffmpeg_command += ["-stream_loop", "-1"]
-        ffmpeg_command += ["-re", "-i", file_path, "-copyts"]
+        # Используем -re для чтения файла с нативной частотой кадров
+        # -copyts сохраняет исходные временные метки
+        ffmpeg_command += ["-re", "-i", file_path_for_ffmpeg, "-copyts"]
     else:
         logger.error(f"Invalid source type '{source_type}' for stream {stream_key}")
         return

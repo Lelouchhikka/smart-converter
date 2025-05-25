@@ -12,45 +12,77 @@
         /* ... existing styles ... */
         
         .stream-item {
-            background: #fff;
-            border: 1px solid #ddd;
-            border-radius: 4px;
+            background-color: #ffffff;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
             padding: 15px;
             margin-bottom: 10px;
             display: flex;
             justify-content: space-between;
             align-items: flex-start;
+            transition: all 0.3s ease;
+        }
+
+        .stream-item:hover {
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
         }
 
         .stream-info {
             flex: 1;
+            margin-right: 15px;
         }
 
         .stream-info h3 {
             margin: 0 0 10px 0;
             font-size: 1.1em;
+            color: #333;
         }
 
         .stream-info p {
             margin: 5px 0;
             font-size: 0.9em;
+            color: #666;
         }
 
         .stream-actions {
-            margin-left: 15px;
+            display: flex;
+            gap: 8px;
+            align-items: center;
         }
 
-        .delete-btn {
+        .btn-action {
+            padding: 6px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.9em;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            transition: all 0.2s ease;
+        }
+
+        .btn-graph {
+            background: #17a2b8;
+            color: white;
+            border: none;
+        }
+
+        .btn-graph:hover {
+            background: #138496;
+        }
+
+        .btn-delete {
             background: #dc3545;
             color: white;
             border: none;
-            padding: 5px 10px;
-            border-radius: 4px;
-            cursor: pointer;
         }
 
-        .delete-btn:hover {
+        .btn-delete:hover {
             background: #c82333;
+        }
+
+        .btn-action i {
+            font-size: 0.9em;
         }
 
         .status-active {
@@ -63,6 +95,52 @@
 
         .status-pending {
             color: #ffc107;
+        }
+
+        .drone-popup {
+            min-width: 300px;
+        }
+        
+        .video-container {
+            margin-top: 10px;
+            width: 100%;
+            max-width: 320px;
+            background: #000;
+            border-radius: 4px;
+            overflow: hidden;
+            position: relative;
+        }
+        
+        .drone-video {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+        
+        .video-loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 10px 20px;
+            border-radius: 4px;
+            display: none;
+        }
+        
+        .video-loading.active {
+            display: block;
+        }
+        
+        .video-container.loading::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.5);
         }
     </style>
 </head>
@@ -170,6 +248,8 @@
     </div>
 </div>
 
+<video id="hlsPlayer" controls></video>
+
 <script>
 let map;
 let markers = {};
@@ -193,29 +273,453 @@ function initMap() {
 
 // Обновление маркеров на карте
 function updateMarkers(telemetry) {
-    for (const [streamId, data] of Object.entries(telemetry)) {
-        if (!markers[streamId]) {
-            markers[streamId] = L.marker([data.latitude, data.longitude]).addTo(map);
-            markers[streamId].bindPopup(`
-                <strong>Дрон: ${streamId}</strong><br>
-                Высота: ${data.altitude.toFixed(1)} м<br>
-                Скорость: ${data.speed.toFixed(1)} м/с<br>
-                Батарея: ${data.battery.toFixed(1)}%<br>
-                Сигнал: ${data.signal_strength.toFixed(1)}%
-            `);
-        } else {
-            markers[streamId].setLatLng([data.latitude, data.longitude]);
+    // Удаляем старые маркеры, которых больше нет в телеметрии
+    for (const streamId in markers) {
+        if (!telemetry[streamId]) {
+            map.removeLayer(markers[streamId]);
+            delete markers[streamId];
         }
     }
-}
 
-// Обновление списка дронов с real-time HLS
-async function updateDronesList(telemetry) {
-    // Этот блок кода будет удален, так как рендеринг будет выполняться в updateData
-    // ... старый код updateDronesList ...
-    
-    // Оставляем возможность использования данных телеметрии для других целей, если потребуется
-    // console.log("Received telemetry in updateDronesList:", telemetry);
+    for (const [streamId, data] of Object.entries(telemetry)) {
+        const status = data.status || "inactive";
+        let markerColor;
+        
+        switch(status) {
+            case 'active':
+                markerColor = '#28a745'; // зеленый
+                break;
+            case 'error':
+                markerColor = '#dc3545'; // красный
+                break;
+            case 'pending':
+                markerColor = '#ffc107'; // желтый
+                break;
+            default:
+                markerColor = '#6c757d'; // серый
+        }
+
+        if (!markers[streamId]) {
+            const droneIcon = L.divIcon({
+                className: `drone-icon status-${status}`,
+                html: `<div style="
+                    width: 12px;
+                    height: 12px;
+                    background-color: ${markerColor};
+                    border: 2px solid white;
+                    border-radius: 50%;
+                    box-shadow: 0 0 4px rgba(0,0,0,0.3);
+                "></div>`,
+                iconSize: [12, 12],
+                iconAnchor: [6, 6],
+                popupAnchor: [0, -6]
+            });
+
+            markers[streamId] = L.marker([data.latitude, data.longitude], {icon: droneIcon}).addTo(map);
+            const popup = L.popup({
+                closeButton: true,
+                closeOnClick: false,
+                autoClose: false
+            }).setContent(`
+                <div class="drone-popup">
+                    <strong>Дрон: ${streamId}</strong><br>
+                    Статус: <span class="status-${status}">${status}</span><br>
+                    Высота: ${data.altitude !== undefined ? data.altitude.toFixed(1) + ' м' : 'N/A'}<br>
+                    Скорость: ${data.speed !== undefined ? data.speed.toFixed(1) + ' м/с' : 'N/A'}<br>
+                    Батарея: ${data.battery !== undefined ? data.battery.toFixed(1) + '%' : 'N/A'}<br>
+                    Сигнал: ${data.signal_strength !== undefined ? data.signal_strength.toFixed(1) + '%' : 'N/A'}<br>
+                    <div class="video-container">
+                        <video id="video-${streamId}" class="drone-video" controls></video>
+                        <div id="loading-${streamId}" class="video-loading">
+                            <i class="fas fa-spinner fa-spin"></i> Загрузка видео...
+                        </div>
+                    </div>
+                </div>
+            `);
+            
+            markers[streamId].bindPopup(popup);
+            
+            // Инициализируем HLS для видео
+            const videoElement = document.getElementById(`video-${streamId}`);
+            const loadingElement = document.getElementById(`loading-${streamId}`);
+            
+            if (videoElement && loadingElement && Hls.isSupported()) {
+                const videoContainer = loadingElement.parentElement;
+                videoContainer.classList.add('loading');
+                loadingElement.classList.add('active');
+                
+                const hls = new Hls({
+                    debug: false,
+                    enableWorker: true,
+                    maxBufferLength: 60,
+                    maxMaxBufferLength: 120,
+                    maxBufferSize: 120 * 1000 * 1000,
+                    maxBufferHole: 0.3,
+                    highBufferWatchdogPeriod: 2,
+                    nudgeMaxRetry: 5,
+                    nudgeOffset: 0.1,
+                    startFragPrefetch: true,
+                    testBandwidth: true,
+                    progressive: true,
+                    lowLatencyMode: false,
+                    backBufferLength: 60,
+                    maxStarvationDelay: 2,
+                    maxLoadingDelay: 2,
+                    minAutoBitrate: 0,
+                    abrEwmaDefaultEstimate: 500000,
+                    abrBandWidthFactor: 0.95,
+                    abrBandWidthUpFactor: 0.7,
+                    abrMaxWithRealBitrate: true,
+                    maxFragLookUpTolerance: 0.25,
+                    startLevel: -1,
+                    abrEwmaFastLive: 3.0,
+                    abrEwmaSlowLive: 9.0,
+                    manifestLoadPolicy: {
+                        default: {
+                            maxTimeToFirstByteMs: 10000,
+                            maxLoadTimeMs: 20000,
+                            timeoutRetry: {
+                                maxNumRetry: 3,
+                                retryDelayMs: 1000,
+                                maxRetryDelayMs: 2000
+                            },
+                            errorRetry: {
+                                maxNumRetry: 3,
+                                retryDelayMs: 1000,
+                                maxRetryDelayMs: 2000
+                            }
+                        }
+                    },
+                    playlistLoadPolicy: {
+                        default: {
+                            maxTimeToFirstByteMs: 10000,
+                            maxLoadTimeMs: 20000,
+                            timeoutRetry: {
+                                maxNumRetry: 3,
+                                retryDelayMs: 1000,
+                                maxRetryDelayMs: 2000
+                            },
+                            errorRetry: {
+                                maxNumRetry: 3,
+                                retryDelayMs: 1000,
+                                maxRetryDelayMs: 2000
+                            }
+                        }
+                    },
+                    fragLoadPolicy: {
+                        default: {
+                            maxTimeToFirstByteMs: 10000,
+                            maxLoadTimeMs: 20000,
+                            timeoutRetry: {
+                                maxNumRetry: 3,
+                                retryDelayMs: 1000,
+                                maxRetryDelayMs: 2000
+                            },
+                            errorRetry: {
+                                maxNumRetry: 3,
+                                retryDelayMs: 1000,
+                                maxRetryDelayMs: 2000
+                            }
+                        }
+                    }
+                });
+                
+                const hlsUrl = `http://localhost:8888/${streamId}/index.m3u8`;
+                console.log('Загрузка HLS потока:', hlsUrl);
+                
+                let recoveryAttempts = 0;
+                const MAX_RECOVERY_ATTEMPTS = 3;
+                let lastErrorTime = 0;
+                const ERROR_COOLDOWN = 5000; // 5 секунд между попытками восстановления
+                
+                hls.on(Hls.Events.ERROR, function(event, data) {
+                    console.error('HLS ошибка:', data);
+                    const now = Date.now();
+                    
+                    if (data.fatal) {
+                        if (now - lastErrorTime < ERROR_COOLDOWN) {
+                            console.log('Пропускаем восстановление из-за кулдауна');
+                            return;
+                        }
+                        
+                        lastErrorTime = now;
+                        
+                        switch(data.type) {
+                            case Hls.ErrorTypes.NETWORK_ERROR:
+                                console.error('Ошибка сети:', data);
+                                if (recoveryAttempts < MAX_RECOVERY_ATTEMPTS) {
+                                    recoveryAttempts++;
+                                    loadingElement.innerText = `Ошибка сети, попытка восстановления ${recoveryAttempts}/${MAX_RECOVERY_ATTEMPTS}...`;
+                                    setTimeout(() => {
+                                        hls.startLoad();
+                                    }, 1000);
+                                } else {
+                                    loadingElement.innerText = 'Не удалось восстановить соединение';
+                                    hls.destroy();
+                                }
+                                break;
+                            case Hls.ErrorTypes.MEDIA_ERROR:
+                                console.error('Ошибка медиа:', data);
+                                if (recoveryAttempts < MAX_RECOVERY_ATTEMPTS) {
+                                    recoveryAttempts++;
+                                    loadingElement.innerText = `Ошибка медиа, попытка восстановления ${recoveryAttempts}/${MAX_RECOVERY_ATTEMPTS}...`;
+                                    setTimeout(() => {
+                                        hls.recoverMediaError();
+                                    }, 1000);
+                                } else {
+                                    loadingElement.innerText = 'Не удалось восстановить медиа';
+                                    hls.destroy();
+                                }
+                                break;
+                            default:
+                                console.error('Фатальная ошибка:', data);
+                                loadingElement.innerText = 'Ошибка загрузки потока';
+                                hls.destroy();
+                                break;
+                        }
+                    }
+                });
+
+                hls.on(Hls.Events.MANIFEST_LOADING, function() {
+                    console.log('Загрузка HLS манифеста...');
+                    loadingElement.innerText = 'Загрузка потока...';
+                });
+
+                hls.on(Hls.Events.MANIFEST_LOADED, function() {
+                    console.log('HLS манифест загружен успешно');
+                    recoveryAttempts = 0;
+                });
+
+                hls.on(Hls.Events.LEVEL_LOADED, function(event, data) {
+                    console.log('Уровень качества загружен:', data);
+                });
+
+                hls.on(Hls.Events.FRAG_LOADED, function(event, data) {
+                    console.log('Фрагмент загружен:', data);
+                });
+
+                hls.loadSource(hlsUrl);
+                hls.attachMedia(videoElement);
+                
+                hls.on(Hls.Events.MANIFEST_PARSED, function() {
+                    console.log('HLS манифест загружен');
+                    videoElement.play().then(() => {
+                        videoContainer.classList.remove('loading');
+                        loadingElement.classList.remove('active');
+                    }).catch(error => {
+                        console.error('Ошибка воспроизведения:', error);
+                        loadingElement.innerText = 'Ошибка воспроизведения';
+                    });
+                });
+            }
+            
+            // Добавляем обработчик закрытия попапа
+            markers[streamId].on('popupclose', function() {
+                const video = document.getElementById(`video-${streamId}`);
+                if (video) {
+                    video.pause();
+                    video.src = '';
+                }
+                if (markers[streamId].hls) {
+                    markers[streamId].hls.destroy();
+                    markers[streamId].hls = null;
+                }
+            });
+            
+            // Добавляем обработчик клика для выбора дрона и загрузки истории телеметрии
+            markers[streamId].on('click', function() {
+                selectDrone(streamId);
+            });
+
+        } else {
+            // Обновляем позицию существующего маркера
+            markers[streamId].setLatLng([data.latitude, data.longitude]);
+            
+            // Обновляем иконку, если статус изменился
+            const currentIcon = markers[streamId].getIcon();
+            if (!currentIcon.options.className.includes(`status-${status}`)) {
+                const markerColor = status === 'active' ? '#28a745' : 
+                                   status === 'error' ? '#dc3545' : 
+                                   status === 'pending' ? '#ffc107' : '#6c757d';
+
+                const newIcon = L.divIcon({
+                    className: `drone-icon status-${status}`,
+                    html: `<div style="
+                        width: 12px;
+                        height: 12px;
+                        background-color: ${markerColor};
+                        border: 2px solid white;
+                        border-radius: 50%;
+                        box-shadow: 0 0 4px rgba(0,0,0,0.3);
+                    "></div>`,
+                    iconSize: [12, 12],
+                    iconAnchor: [6, 6],
+                    popupAnchor: [0, -6]
+                });
+                markers[streamId].setIcon(newIcon);
+            }
+            
+            // Обновляем содержимое попапа
+            const popupContent = `
+                <div class="drone-popup">
+                    <strong>Дрон: ${streamId}</strong><br>
+                    Высота: ${data.altitude !== undefined ? data.altitude.toFixed(1) + ' м' : 'N/A'}<br>
+                    Скорость: ${data.speed !== undefined ? data.speed.toFixed(1) + ' м/с' : 'N/A'}<br>
+                    Батарея: ${data.battery !== undefined ? data.battery.toFixed(1) + '%' : 'N/A'}<br>
+                    Сигнал: ${data.signal_strength !== undefined ? data.signal_strength.toFixed(1) + '%' : 'N/A'}<br>
+                    <div class="video-container">
+                        <video id="video-${streamId}" class="drone-video" controls></video>
+                        <div id="loading-${streamId}" class="video-loading">
+                            <i class="fas fa-spinner fa-spin"></i> Загрузка видео...
+                        </div>
+                    </div>
+                </div>
+            `;
+            
+            // Проверяем, открыт ли попап
+            const isPopupOpen = markers[streamId].getPopup().isOpen();
+            markers[streamId].setPopupContent(popupContent);
+            
+            // Если попап был открыт, переинициализируем HLS
+            if (isPopupOpen) {
+                const videoElement = document.getElementById(`video-${streamId}`);
+                const loadingElement = document.getElementById(`loading-${streamId}`);
+                
+                if (videoElement && loadingElement && Hls.isSupported()) {
+                    const videoContainer = loadingElement.parentElement;
+                    videoContainer.classList.add('loading');
+                    loadingElement.classList.add('active');
+                    
+                    const hls = new Hls({
+                        debug: false,
+                        enableWorker: true,
+                        maxBufferLength: 60,
+                        maxMaxBufferLength: 120,
+                        maxBufferSize: 120 * 1000 * 1000,
+                        maxBufferHole: 0.3,
+                        highBufferWatchdogPeriod: 2,
+                        nudgeMaxRetry: 5,
+                        nudgeOffset: 0.1,
+                        startFragPrefetch: true,
+                        testBandwidth: true,
+                        progressive: true,
+                        lowLatencyMode: false,
+                        backBufferLength: 60,
+                        maxStarvationDelay: 2,
+                        maxLoadingDelay: 2,
+                        minAutoBitrate: 0,
+                        abrEwmaDefaultEstimate: 500000,
+                        abrBandWidthFactor: 0.95,
+                        abrBandWidthUpFactor: 0.7,
+                        abrMaxWithRealBitrate: true,
+                        maxFragLookUpTolerance: 0.25,
+                        startLevel: -1,
+                        abrEwmaFastLive: 3.0,
+                        abrEwmaSlowLive: 9.0,
+                        manifestLoadPolicy: {
+                            default: {
+                                maxTimeToFirstByteMs: 10000,
+                                maxLoadTimeMs: 20000,
+                                timeoutRetry: {
+                                    maxNumRetry: 3,
+                                    retryDelayMs: 1000,
+                                    maxRetryDelayMs: 2000
+                                },
+                                errorRetry: {
+                                    maxNumRetry: 3,
+                                    retryDelayMs: 1000,
+                                    maxRetryDelayMs: 2000
+                                }
+                            }
+                        },
+                        playlistLoadPolicy: {
+                            default: {
+                                maxTimeToFirstByteMs: 10000,
+                                maxLoadTimeMs: 20000,
+                                timeoutRetry: {
+                                    maxNumRetry: 3,
+                                    retryDelayMs: 1000,
+                                    maxRetryDelayMs: 2000
+                                },
+                                errorRetry: {
+                                    maxNumRetry: 3,
+                                    retryDelayMs: 1000,
+                                    maxRetryDelayMs: 2000
+                                }
+                            }
+                        },
+                        fragLoadPolicy: {
+                            default: {
+                                maxTimeToFirstByteMs: 10000,
+                                maxLoadTimeMs: 20000,
+                                timeoutRetry: {
+                                    maxNumRetry: 3,
+                                    retryDelayMs: 1000,
+                                    maxRetryDelayMs: 2000
+                                },
+                                errorRetry: {
+                                    maxNumRetry: 3,
+                                    retryDelayMs: 1000,
+                                    maxRetryDelayMs: 2000
+                                }
+                            }
+                        }
+                    });
+                    
+                    const hlsUrl = `http://localhost:8888/${streamId}/index.m3u8`;
+                    console.log('Загрузка HLS потока:', hlsUrl);
+                    hls.loadSource(hlsUrl);
+                    hls.attachMedia(videoElement);
+                    
+                    hls.on(Hls.Events.MANIFEST_PARSED, function() {
+                        console.log('HLS манифест загружен');
+                        videoElement.play().then(() => {
+                            videoContainer.classList.remove('loading');
+                            loadingElement.classList.remove('active');
+                        }).catch(error => {
+                            console.error('Ошибка воспроизведения:', error);
+                            loadingElement.innerText = 'Ошибка воспроизведения';
+                        });
+                    });
+
+                    hls.on(Hls.Events.ERROR, function(event, data) {
+                        console.error('HLS ошибка:', data);
+                        if (data.fatal) {
+                            switch(data.type) {
+                                case Hls.ErrorTypes.NETWORK_ERROR:
+                                    console.error('Ошибка сети:', data);
+                                    loadingElement.innerText = 'Ошибка сети';
+                                    hls.startLoad();
+                                    break;
+                                case Hls.ErrorTypes.MEDIA_ERROR:
+                                    console.error('Ошибка медиа:', data);
+                                    loadingElement.innerText = 'Ошибка медиа';
+                                    hls.recoverMediaError();
+                                    break;
+                                default:
+                                    console.error('Фатальная ошибка:', data);
+                                    loadingElement.innerText = 'Ошибка загрузки потока';
+                                    hls.destroy();
+                                    break;
+                            }
+                        }
+                    });
+
+                    hls.on(Hls.Events.MANIFEST_LOADING, function() {
+                        console.log('Загрузка HLS манифеста...');
+                        loadingElement.innerText = 'Загрузка потока...';
+                    });
+
+                    hls.on(Hls.Events.MANIFEST_LOADED, function() {
+                        console.log('HLS манифест загружен успешно');
+                    });
+                    
+                    // Сохраняем ссылку на HLS инстанс
+                    markers[streamId].hls = hls;
+                }
+            }
+        }
+    }
 }
 
 // Инициализация графика телеметрии
@@ -229,359 +733,587 @@ function initTelemetryChart() {
                 label: 'Высота',
                 data: [],
                 borderColor: 'rgb(75, 192, 192)',
-                tension: 0.1
+                tension: 0.1,
+                yAxisID: 'y'
             }, {
                 label: 'Скорость',
                 data: [],
                 borderColor: 'rgb(255, 99, 132)',
-                tension: 0.1
+                tension: 0.1,
+                yAxisID: 'y1'
+            }, {
+                label: 'Батарея',
+                data: [],
+                borderColor: 'rgb(255, 205, 86)',
+                tension: 0.1,
+                yAxisID: 'y'
+            }, {
+                label: 'Сигнал',
+                data: [],
+                borderColor: 'rgb(54, 162, 235)',
+                tension: 0.1,
+                yAxisID: 'y1'
             }]
         },
         options: {
             responsive: true,
+            interaction: {
+                mode: 'index', // Включаем взаимодействие по индексу для тултипов
+                intersect: false,
+            },
+            stacked: false, // Отключаем стекинг для независимых осей
             scales: {
                 y: {
-                    beginAtZero: true
+                    type: 'linear',
+                    display: true,
+                    position: 'left',
+                    beginAtZero: true,
+                    title: {
+                        display: true,
+                        text: 'Высота (м) / Батарея (%)'
+                    }
+                },
+                y1: {
+                    type: 'linear',
+                    display: true,
+                    position: 'right',
+                    beginAtZero: true,
+                    title: {
+                        display: true,
+                        text: 'Скорость (м/с) / Сигнал (%)'
+                    },
+                    grid: {
+                        drawOnChartArea: false, // Не рисуем сетку для правой оси
+                    }
+                }
+            },
+            plugins: {
+                title: {
+                    display: true,
+                    text: 'Телеметрия выбранного дрона'
                 }
             }
         }
     });
 }
 
-// Обновление данных
-async function updateData() {
-    try {
-        const [telemetryResponse, healthResponse] = await Promise.all([
-            fetch('/api/telemetry'),
-            fetch('/api/health')
-        ]);
-        
-        if (telemetryResponse.ok && healthResponse.ok) {
-            const telemetry = await telemetryResponse.json();
-            const health = await healthResponse.json();
-            
-            updateMarkers(telemetry);
-            // updateDronesList(telemetry); // Вызов устаревшей логики, удаляем
-            
-            // Получаем список потоков отдельно для отображения списка
-            const streamsResponse = await fetch('/api/streams');
-             if (streamsResponse.ok) {
-                 const streams = await streamsResponse.json();
-                 console.log("Streams received in updateData:", streams); // Логируем полученные потоки
-                 lastStreams = streams.reduce((acc, stream) => {
-                     acc[stream.stream_key] = stream;
-                     return acc;
-                 }, {});
-                 renderStreamsList(streams); // Рендерим список потоков, используя новую функцию
-             } else {
-                 console.error('Ошибка при получении списка потоков:', streamsResponse.statusText);
-             }
-
-            // Обновление статуса сервера
-            document.getElementById('server-status').className = 
-                `badge ${health.status === 'healthy' ? 'bg-success' : 'bg-danger'}`;
-            document.getElementById('server-status').textContent = 
-                health.status === 'healthy' ? 'Сервер активен' : 'Сервер недоступен';
-        } else {
-            console.error('Ошибка при получении данных:', 
-                telemetryResponse.statusText || healthResponse.statusText);
-             // Если API недоступен, показываем, что сервер недоступен
-             document.getElementById('server-status').className = `badge bg-danger`;
-             document.getElementById('server-status').textContent = 'Сервер недоступен';
-        }
-    } catch (error) {
-        console.error('Ошибка при обновлении данных:', error);
-         // Если произошла ошибка, показываем, что сервер недоступен
-         document.getElementById('server-status').className = `badge bg-danger`;
-         document.getElementById('server-status').textContent = 'Сервер недоступен';
+// Функция для выбора дрона и загрузки его истории телеметрии
+async function selectDrone(droneId) {
+    selectedDrone = droneId;
+    console.log(`Выбран дрон: ${selectedDrone}`);
+    // Обновляем заголовок графика
+    if (telemetryChart && telemetryChart.options.plugins.title) {
+        telemetryChart.options.plugins.title.text = `Телеметрия дрона: ${selectedDrone}`;
+        telemetryChart.update();
     }
+
+    // Загружаем историю телеметрии для выбранного дрона
+    await loadTelemetryHistory(droneId);
 }
 
-// Загрузка списка потоков при загрузке страницы и каждом открытии модального окна симулятора
-document.addEventListener('DOMContentLoaded', () => {
-    initMap();
-    loadStreams();
-    // Обновляем список потоков каждые 5 секунд
-    setInterval(loadStreams, 5000);
-});
-
-// Функция для отображения списка потоков
-function renderStreamsList(streams) {
-    const streamsList = document.getElementById('streamsList');
-    if (!streamsList) {
-        console.error('Element with id "streamsList" not found');
-        return;
-    }
-    
-    streamsList.innerHTML = '';
-    
-    if (streams.length === 0) {
-        streamsList.innerHTML = '<div class="alert alert-info">Нет активных потоков</div>';
-        return;
-    }
-    
-    streams.forEach(stream => {
-        console.log('Rendering stream object:', stream);
-        const streamElement = document.createElement('div');
-        streamElement.className = 'stream-item';
-        streamElement.innerHTML = `
-            <div class="stream-info">
-                <h3>Поток: ${stream.stream_key}</h3>
-                <p>Статус: <span class="status-${stream.status}">${stream.status}</span></p>
-                <p>RTMP URL: ${stream.rtmp_url}</p>
-                <p>RTSP URL: ${stream.rtsp_url}</p>
-                <p>HLS URL: ${stream.hls_url || 'N/A'}</p>
-            </div>
-            <div class="stream-actions">
-                <button onclick="deleteStream('${stream.stream_key}')" class="delete-btn">Удалить</button>
-            </div>
-        `;
-        streamsList.appendChild(streamElement);
-    });
-}
-
-// Загрузка списка потоков из API
-async function loadStreams() {
+// Функция для загрузки истории телеметрии с бэкенда
+async function loadTelemetryHistory(droneId) {
     try {
-        const response = await fetch('/api/streams');
+        const response = await fetch(`/api/analytics/history/${droneId}`);
         if (!response.ok) {
+            if (response.status === 404) {
+                console.warn(`История телеметрии для дрона ${droneId} не найдена.`);
+                updateTelemetryChart([]); // Очищаем график
+                return;
+            }
             throw new Error(`HTTP error! status: ${response.status}`);
         }
-        const streams = await response.json();
-        console.log("Streams received in loadStreams:", streams);
-        renderStreamsList(streams);
+        const history = await response.json();
+        console.log(`Загружена история телеметрии для ${droneId}: `, history);
+        updateTelemetryChart(history); // Обновляем график с полученными данными
     } catch (error) {
-        console.error('Error loading streams:', error);
-        const streamsList = document.getElementById('streamsList');
-        if (streamsList) {
-            streamsList.innerHTML = '<div class="alert alert-warning">Не удалось загрузить список потоков.</div>';
-        }
+        console.error(`Ошибка при загрузке истории телеметрии для ${droneId}:`, error);
+        updateTelemetryChart([]); // Очищаем график в случае ошибки
     }
 }
 
-// Обновляем функцию stopStream
-function stopStream(closeWs = true) {
-    if (wsConnection && closeWs) {
-        wsConnection.close();
-    }
+// Функция для обновления данных на графике телеметрии
+function updateTelemetryChart(history) {
+    if (!telemetryChart) return;
 
-    const statusDiv = document.getElementById('streamStatus');
-    const startBtn = document.getElementById('startStreamBtn');
-    const stopBtn = document.getElementById('stopStreamBtn');
-    const previewVideo = document.getElementById('previewVideo');
+    const labels = [];
+    const altitudeData = [];
+    const speedData = [];
+    const batteryData = [];
+    const signalData = [];
 
-    statusDiv.className = 'alert alert-info';
-    statusDiv.textContent = 'Готов к трансляции';
-    startBtn.style.display = 'block';
-    stopBtn.style.display = 'none';
+    history.forEach(point => {
+        const date = new Date(point.timestamp);
+        labels.push(date.toLocaleTimeString()); // Используем только время для меток
+        altitudeData.push(point.altitude);
+        speedData.push(point.speed);
+        batteryData.push(point.battery);
+        signalData.push(point.signal_strength);
+    });
 
-    // Для файла останавливаем воспроизведение предпросмотра и сбрасываем
-    previewVideo.pause();
-    previewVideo.currentTime = 0; // Сбрасываем на начало
-     if (videoFile) {
-         previewVideo.src = URL.createObjectURL(videoFile); // Перезагружаем для возможности повторного воспроизведения
-     }
-    
-     startBtn.disabled = false; // Включаем обратно
-     stopBtn.disabled = false; // Включаем обратно
+    telemetryChart.data.labels = labels;
+    telemetryChart.data.datasets[0].data = altitudeData;
+    telemetryChart.data.datasets[1].data = speedData;
+    telemetryChart.data.datasets[2].data = batteryData;
+    telemetryChart.data.datasets[3].data = signalData;
+    telemetryChart.update();
 }
 
-function copyRtmpUrl(event) {
-    const rtmpUrl = document.getElementById('rtmpUrl');
-    const streamKey = document.getElementById('streamKey').value;
-    const fullUrl = rtmpUrl.value + streamKey;
+// Функция для обновления списка потоков (адаптирована для использования данных монитора)
+async function updateStreamsList(streams) {
+    const streamsListDiv = document.getElementById('streamsList');
+    const parentContainer = streamsListDiv.parentElement;
     
-    navigator.clipboard.writeText(fullUrl).then(() => {
-        const btn = event.target.closest('button');
-        const originalText = btn.innerHTML;
-        btn.innerHTML = '<i class="fas fa-check"></i>';
-        setTimeout(() => {
-            btn.innerHTML = originalText;
-        }, 2000);
-    }).catch(err => {
-        console.error('Ошибка копирования:', err);
+    // Создаем или находим контейнер для уведомлений
+    let notificationsContainer = parentContainer.querySelector('.notifications-container');
+    if (!notificationsContainer) {
+        notificationsContainer = document.createElement('div');
+        notificationsContainer.className = 'notifications-container';
+        parentContainer.insertBefore(notificationsContainer, streamsListDiv);
+    }
+    
+    streamsListDiv.innerHTML = '';
+
+    if (streams.length === 0) {
+        streamsListDiv.innerHTML = '<p class="text-muted text-center">Активных потоков нет.</p>';
+        return;
+    }
+
+    streams.sort((a, b) => a.stream_key.localeCompare(b.stream_key));
+
+    for (const stream of streams) {
+        const streamElement = document.createElement('div');
+        streamElement.classList.add('stream-item');
+        streamElement.innerHTML = `
+            <div class="stream-info">
+                <h3>
+                    <i class="fas fa-drone"></i>
+                    Дрон: ${stream.stream_key}
+                </h3>
+                <p>
+                </p>
+                <p><i class="fas fa-video"></i> RTMP: ${stream.rtmp_url}</p>
+                <p><i class="fas fa-broadcast-tower"></i> RTSP: ${stream.rtsp_url}</p>
+                ${stream.hls_url ? `<p><i class="fas fa-play-circle"></i> HLS: <a href="${stream.hls_url}" target="_blank">${stream.hls_url}</a></p>` : ''}
+            </div>
+            <div class="stream-actions">
+                <button type="button" class="btn-action btn-graph" data-drone-id="${stream.stream_key}" title="Показать график">
+                    <i class="fas fa-chart-line"></i>
+                    График
+                </button>
+                <button type="button" class="btn-action btn-delete" data-stream-key="${stream.stream_key}" title="Удалить дрон">
+                    <i class="fas fa-trash"></i>
+                    Удалить
+                </button>
+            </div>
+        `;
+        streamsListDiv.appendChild(streamElement);
+    }
+    
+    // Добавляем обработчики клика для кнопок "График"
+    streamsListDiv.querySelectorAll('.btn-graph').forEach(button => {
+        button.addEventListener('click', (event) => {
+            const droneId = event.currentTarget.dataset.droneId;
+            selectDrone(droneId);
+            // Прокручиваем к графику
+            document.querySelector('#telemetry-chart').scrollIntoView({ behavior: 'smooth' });
+        });
+    });
+    
+    // Добавляем обработчики клика для кнопок "Удалить"
+    streamsListDiv.querySelectorAll('.btn-delete').forEach(button => {
+        button.addEventListener('click', async (event) => {
+            const streamKeyToDelete = event.currentTarget.dataset.streamKey;
+            if (confirm(`Вы уверены, что хотите удалить дрон ${streamKeyToDelete}?`)) {
+                try {
+                    const response = await fetch(`/api/streams/${streamKeyToDelete}`, {
+                        method: 'DELETE'
+                    });
+                    
+                    if (!response.ok) {
+                        throw new Error(`Ошибка при удалении: ${response.status}`);
+                    }
+                    
+                    // Удаляем маркер с карты
+                    if (markers[streamKeyToDelete]) {
+                        map.removeLayer(markers[streamKeyToDelete]);
+                        delete markers[streamKeyToDelete];
+                    }
+                    
+                    // Обновляем список потоков
+                    await fetchDataAndUpdateUI();
+                    
+                    // Показываем уведомление об успешном удалении
+                    const notification = document.createElement('div');
+                    notification.className = 'alert alert-success alert-dismissible fade show';
+                    notification.innerHTML = `
+                        Дрон ${streamKeyToDelete} успешно удален
+                        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                    `;
+                    
+                    // Добавляем уведомление в контейнер
+                    notificationsContainer.appendChild(notification);
+                    
+                    // Удаляем уведомление через 3 секунды
+                    setTimeout(() => {
+                        notification.remove();
+                        // Если контейнер пуст, удаляем его
+                        if (notificationsContainer.children.length === 0) {
+                            notificationsContainer.remove();
+                        }
+                    }, 3000);
+                    
+                } catch (error) {
+                    console.error('Ошибка при удалении дрона:', error);
+                    alert(`Не удалось удалить дрон: ${error.message}`);
+                }
+            }
+        });
     });
 }
 
-// Обработчик кнопки "Начать трансляцию"
+// Главная функция для получения данных и обновления UI
+async function fetchDataAndUpdateUI() {
+    try {
+        // Получаем список потоков из API
+        const streamsResponse = await fetch('/api/streams');
+        if (!streamsResponse.ok) throw new Error(`HTTP error! status: ${streamsResponse.status}`);
+        const streamsData = await streamsResponse.json();
+        lastStreams = streamsData;
+        console.log('Получены данные потоков:', streamsData);
+        
+        // Обновляем список потоков на странице
+        updateStreamsList(streamsData);
+
+        // Получаем текущую телеметрию всех дронов
+        const telemetryResponse = await fetch('/api/telemetry');
+        if (!telemetryResponse.ok) throw new Error(`HTTP error! status: ${telemetryResponse.status}`);
+        const telemetryData = await telemetryResponse.json();
+        console.log('Получены данные телеметрии:', telemetryData);
+
+        // Обновляем маркеры на карте
+        updateMarkers(telemetryData);
+
+        // Если выбран какой-то дрон, обновляем его график истории (получаем последние данные)
+        // Если нужно получать real-time обновления графика, можно использовать WebSocket или другой механизм
+        // Для простоты пока просто перезагружаем историю для выбранного дрона
+        if (selectedDrone) {
+            await loadTelemetryHistory(selectedDrone); // Загружаем последние 100 точек истории
+        }
+
+    } catch (error) {
+        console.error('Ошибка при получении данных:', error);
+        // Можно отобразить сообщение об ошибке на странице
+    }
+}
+
+// Обновление данных каждые несколько секунд
+setInterval(fetchDataAndUpdateUI, 3000); // Обновляем данные каждые 3 секунды
+
+// Инициализация при загрузке страницы
+document.addEventListener('DOMContentLoaded', () => {
+    initMap();
+    initTelemetryChart();
+    fetchDataAndUpdateUI(); // Первичная загрузка данных
+});
+
+// Вспомогательная функция для копирования RTMP URL (из модального окна)
+function copyRtmpUrl(event) {
+    const rtmpUrlInput = document.getElementById('rtmpUrl');
+    const streamKeyInput = document.getElementById('streamKey');
+    const fullRtmpUrl = rtmpUrlInput.value + streamKeyInput.value;
+    navigator.clipboard.writeText(fullRtmpUrl).then(() => {
+        console.log('RTMP URL скопирован в буфер обмена: ' + fullRtmpUrl);
+        // Можно добавить визуальный фидбек для пользователя
+        const button = event.target.closest('button');
+        if (button) {
+            button.innerHTML = '<i class="fas fa-check"></i>'; // Заменяем иконку на галочку
+            setTimeout(() => {
+                button.innerHTML = '<i class="fas fa-copy"></i>'; // Возвращаем исходную иконку через 2 секунды
+            }, 2000);
+        }
+    }).catch(err => {
+        console.error('Не удалось скопировать RTMP URL: ', err);
+        // Можно отобразить сообщение об ошибке
+    });
+}
+
+// RTMP Симулятор Логика (из модального окна)
+document.getElementById('videoFile').addEventListener('change', (event) => {
+    videoFile = event.target.files[0];
+    if (videoFile) {
+        const videoElement = document.getElementById('previewVideo');
+        videoElement.src = URL.createObjectURL(videoFile);
+        videoElement.style.display = 'block'; // Показываем предпросмотр
+    }
+});
+
 document.getElementById('startStreamBtn').addEventListener('click', async () => {
     const streamKey = document.getElementById('streamKey').value;
-    const videoSource = 'file'; // Всегда файл
-    const statusDiv = document.getElementById('streamStatus');
+    const streamStatusDiv = document.getElementById('streamStatus');
     const startBtn = document.getElementById('startStreamBtn');
     const stopBtn = document.getElementById('stopStreamBtn');
-
+    
     if (!streamKey) {
-        statusDiv.className = 'alert alert-danger';
-        statusDiv.textContent = 'Ключ потока не может быть пустым!';
+        alert('Введите ключ потока.');
         return;
     }
-
-    startBtn.disabled = true; // Отключаем кнопку, чтобы избежать повторных нажатий
-    statusDiv.className = 'alert alert-info';
-    statusDiv.textContent = 'Подготовка к трансляции...';
-
-    let filePath = null;
-    const fileInput = document.getElementById('videoFile');
-    videoFile = fileInput.files[0];
-    const videoLoop = true; // Всегда зацикливаем
 
     if (!videoFile) {
-        statusDiv.className = 'alert alert-danger';
-        statusDiv.textContent = 'Пожалуйста, выберите видеофайл.';
-        startBtn.disabled = false;
+        alert('Выберите видеофайл для трансляции.');
         return;
     }
 
-    statusDiv.className = 'alert alert-info';
-    statusDiv.textContent = 'Загрузка файла на сервер...';
-
-    const formData = new FormData();
-    formData.append('file', videoFile);
+    // Отключаем кнопку и показываем статус
+    startBtn.disabled = true;
+    streamStatusDiv.classList.remove('alert-success', 'alert-danger');
+    streamStatusDiv.classList.add('alert-info');
+    streamStatusDiv.innerText = 'Подключение...';
 
     try {
+        // Сначала загружаем файл на сервер
+        const formData = new FormData();
+        formData.append('file', videoFile);
+        
+        streamStatusDiv.innerText = 'Загрузка файла на сервер...';
         const uploadResponse = await fetch('/api/upload_video/', {
             method: 'POST',
             body: formData
         });
-
+        
         if (!uploadResponse.ok) {
-            throw new Error(`Ошибка загрузки файла: ${uploadResponse.statusText}`);
-        }
-
-        const result = await uploadResponse.json();
-        filePath = result.file_path; // Получаем путь к файлу на сервере
-        statusDiv.textContent = 'Файл загружен. Запуск трансляции...';
-
-    } catch (error) {
-        console.error('Ошибка загрузки файла:', error);
-        statusDiv.className = 'alert alert-danger';
-        statusDiv.textContent = `Ошибка загрузки файла: ${error.message}`;
-        startBtn.disabled = false;
-        return;
-    }
-
-    // Устанавливаем WebSocket соединение после подготовки (или загрузки файла)
-    try {
-        // Закрываем предыдущее соединение, если оно есть
-        if (wsConnection && wsConnection.readyState !== WebSocket.CLOSED) {
-             wsConnection.close();
+            const errorText = await uploadResponse.text();
+            throw new Error(`Ошибка загрузки файла: ${uploadResponse.status} - ${errorText}`);
         }
         
-        const wsUrl = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/api/ws/${streamKey}`;
-        wsConnection = new WebSocket(wsUrl);
+        const uploadResult = await uploadResponse.json();
+        console.log('Файл загружен:', uploadResult);
+        streamStatusDiv.innerText = 'Файл загружен. Настройка потока...';
+
+        // Добавляем/обновляем поток в MediaMTX через API
+        const addStreamResponse = await fetch('/api/streams', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            },
+            body: JSON.stringify({
+                stream_key: streamKey,
+                source_type: 'file',
+                file_path: uploadResult.file_path
+            })
+        });
+        
+        if (!addStreamResponse.ok) {
+            const errorText = await addStreamResponse.text();
+            throw new Error(`Ошибка настройки потока в MediaMTX: ${addStreamResponse.status} - ${errorText}`);
+        }
+        console.log(`Поток ${streamKey} настроен в MediaMTX.`);
+
+        // Устанавливаем WebSocket соединение
+        wsConnection = new WebSocket(`ws://${window.location.host}/api/ws/${streamKey}`);
 
         wsConnection.onopen = () => {
-            console.log('WebSocket connection opened');
-            statusDiv.className = 'alert alert-warning';
-            statusDiv.textContent = 'Трансляция активна (запуск FFmpeg)...';
+            console.log('WebSocket соединение установлено.');
+            streamStatusDiv.classList.remove('alert-info');
+            streamStatusDiv.classList.add('alert-success');
+            streamStatusDiv.innerText = 'WebSocket подключен. Запуск FFmpeg...';
+            
+            // Отправляем информацию о файле через WebSocket
+            wsConnection.send(JSON.stringify({
+                sourceType: 'file',
+                filePath: uploadResult.file_path,
+                loopFile: true
+            }));
+            
             startBtn.style.display = 'none';
-            stopBtn.style.display = 'block';
-            stopBtn.disabled = false; // Включаем кнопку остановки
-
-            // Отправляем данные о источнике через WebSocket
-            const message = {
-                sourceType: videoSource, // Теперь всегда 'file'
+            stopBtn.style.display = 'inline-block';
+            startBtn.disabled = false;
+            
+            // Добавляем начальную телеметрию для нового потока
+            const initialTelemetry = {
+                [streamKey]: {
+                    latitude: 43.238949,
+                    longitude: 76.889709,
+                    altitude: 0,
+                    speed: 0,
+                    battery: 100,
+                    signal_strength: 100,
+                    status: 'pending'
+                }
             };
-            message.filePath = filePath; // Путь к загруженному файлу
-            message.loopFile = videoLoop; // Всегда true
-            wsConnection.send(JSON.stringify(message));
+            
+            // Обновляем маркеры на карте с начальной телеметрией
+            updateMarkers(initialTelemetry);
+            
+            // Запускаем периодическое обновление телеметрии для нового потока
+            const telemetryInterval = setInterval(async () => {
+                try {
+                    const response = await fetch('/api/telemetry');
+                    if (response.ok) {
+                        const telemetryData = await response.json();
+                        if (telemetryData[streamKey]) {
+                            // Обновляем статус в зависимости от состояния потока
+                            if (streamStatusDiv.innerText.includes('активна')) {
+                                telemetryData[streamKey].status = 'active';
+                            } else if (streamStatusDiv.innerText.includes('ошибка')) {
+                                telemetryData[streamKey].status = 'error';
+                            }
+                            
+                            // Добавляем случайное движение для симуляции полета
+                            if (telemetryData[streamKey].status === 'active') {
+                                const randomLat = telemetryData[streamKey].latitude + (Math.random() - 0.5) * 0.001;
+                                const randomLon = telemetryData[streamKey].longitude + (Math.random() - 0.5) * 0.001;
+                                telemetryData[streamKey].latitude = randomLat;
+                                telemetryData[streamKey].longitude = randomLon;
+                                telemetryData[streamKey].altitude = Math.max(0, telemetryData[streamKey].altitude + (Math.random() - 0.5) * 2);
+                                telemetryData[streamKey].speed = Math.max(0, telemetryData[streamKey].speed + (Math.random() - 0.5) * 0.5);
+                                telemetryData[streamKey].battery = Math.max(0, telemetryData[streamKey].battery - 0.1);
+                                telemetryData[streamKey].signal_strength = Math.max(0, telemetryData[streamKey].signal_strength + (Math.random() - 0.5) * 2);
+                            }
+                            
+                            updateMarkers(telemetryData);
+                        } else {
+                            console.warn(`Телеметрия для потока ${streamKey} не найдена`);
+                        }
+                    } else {
+                        console.error('Ошибка при получении телеметрии:', response.status);
+                    }
+                } catch (error) {
+                    console.error('Ошибка при обновлении телеметрии:', error);
+                }
+            }, 1000);
+            
+            // Сохраняем интервал для очистки при остановке
+            wsConnection.telemetryInterval = telemetryInterval;
+            
+            fetchDataAndUpdateUI();
         };
 
         wsConnection.onmessage = (event) => {
-            // Обработка сообщений от сервера (например, статус FFmpeg)
-            console.log('WebSocket message received:', event.data);
-            try {
-                const message = JSON.parse(event.data);
-                // Обновляем статус на основе сообщений от сервера
-                if (message.status) {
-                     statusDiv.className = `alert alert-${message.status === 'active' ? 'success' : message.status === 'pending' ? 'info' : 'danger'}`;
-                     statusDiv.textContent = message.message || `Статус: ${message.status}`;
-                     if (message.status === 'active') {
-                         statusDiv.className = 'alert alert-success';
-                         statusDiv.textContent = 'Трансляция активна.';
-                     }
-                }
-            } catch (e) {
-                statusDiv.textContent = `Сообщение от сервера: ${event.data}`;
-                console.log('Received non-JSON message:', event.data);
+            const data = JSON.parse(event.data);
+            console.log('WebSocket получил сообщение:', data);
+            streamStatusDiv.classList.remove('alert-info', 'alert-success', 'alert-danger');
+
+            if (data.status === 'active') {
+                streamStatusDiv.classList.add('alert-success');
+                streamStatusDiv.innerText = 'Трансляция активна';
+            } else if (data.status === 'error') {
+                streamStatusDiv.classList.add('alert-danger');
+                streamStatusDiv.innerText = `Ошибка трансляции: ${data.message}`;
+                stopStream(); // Останавливаем соединение и FFmpeg
+            } else if (data.status === 'completed') {
+                streamStatusDiv.classList.add('alert-info');
+                streamStatusDiv.innerText = 'Трансляция завершена.';
+                stopStream(); // Останавливаем соединение и FFmpeg
+            } else if (data.status === 'pending') {
+                streamStatusDiv.classList.add('alert-info');
+                streamStatusDiv.innerText = `Статус: ${data.message}`;
             }
+            fetchDataAndUpdateUI(); // Обновляем список потоков
         };
 
         wsConnection.onerror = (error) => {
-            console.error('WebSocket error:', error);
-            statusDiv.className = 'alert alert-danger';
-            statusDiv.textContent = 'Ошибка WebSocket соединения.';
-            startBtn.style.display = 'block';
-            stopBtn.style.display = 'none';
-            startBtn.disabled = false;
-            stopBtn.disabled = true;
+            console.error('WebSocket ошибка:', error);
+            streamStatusDiv.classList.remove('alert-info', 'alert-success');
+            streamStatusDiv.classList.add('alert-danger');
+            streamStatusDiv.innerText = `Ошибка WebSocket: ${error.message || JSON.stringify(error)}`;
+            stopStream(); // Останавливаем соединение и FFmpeg
+            fetchDataAndUpdateUI(); // Обновляем список потоков
         };
 
         wsConnection.onclose = (event) => {
-            console.log('WebSocket connection closed:', event.code, event.reason);
-            if (event.code !== 1000) { // 1000 - нормальное закрытие
-                statusDiv.className = 'alert alert-danger';
-                statusDiv.textContent = `Трансляция завершена с ошибкой: ${event.code} ${event.reason}`;
-            } else {
-                 statusDiv.className = 'alert alert-success';
-                 statusDiv.textContent = 'Трансляция завершена.';
+            console.log('WebSocket соединение закрыто:', event);
+            // Если соединение закрылось не по нашей инициативе и не из-за ошибки
+            if (!event.wasClean && event.code !== 1000) {
+                console.warn('WebSocket соединение закрыто с ошибкой или неожиданно.');
+                streamStatusDiv.classList.remove('alert-info', 'alert-success');
+                streamStatusDiv.classList.add('alert-danger');
+                streamStatusDiv.innerText = `WebSocket соединение закрыто. Код: ${event.code}, Причина: ${event.reason || 'неизвестно'}`;
+            } else if (event.code === 1000) {
+                console.log('WebSocket соединение закрыто чисто.');
             }
-            startBtn.style.display = 'block';
+            // Если кнопка стоп не была нажата нами, но поток завершился (например, файл закончился)
+            if(stopBtn.style.display !== 'none' && streamStatusDiv.innerText.indexOf('Трансляция завершена.') === -1) {
+                // Поток завершился неожиданно
+                streamStatusDiv.classList.remove('alert-info', 'alert-success');
+                streamStatusDiv.classList.add('alert-danger');
+                streamStatusDiv.innerText = `Трансляция завершена неожиданно. Код: ${event.code}`;
+            }
+
+            startBtn.style.display = 'inline-block';
             stopBtn.style.display = 'none';
-            startBtn.disabled = false;
-            stopBtn.disabled = true;
-            // Для файла сбрасываем воспроизведение предпросмотра
-            if (videoFile) {
-                const previewVideo = document.getElementById('previewVideo');
-                previewVideo.pause();
-                previewVideo.currentTime = 0;
-                previewVideo.src = URL.createObjectURL(videoFile); // Сбрасываем для возможности повторного воспроизведения
-            }
+            startBtn.disabled = false; // Снова включаем кнопку старт
+            fetchDataAndUpdateUI(); // Обновляем список потоков
         };
 
     } catch (error) {
-        console.error('Ошибка при установке WebSocket соединения:', error);
-        statusDiv.className = 'alert alert-danger';
-        statusDiv.textContent = `Не удалось установить WebSocket соединение: ${error.message}`;
+        console.error('Ошибка при запуске трансляции:', error);
+        streamStatusDiv.classList.remove('alert-info', 'alert-success');
+        streamStatusDiv.classList.add('alert-danger');
+        streamStatusDiv.innerText = `Ошибка: ${error.message}`;
         startBtn.disabled = false;
+        fetchDataAndUpdateUI(); // Обновляем список потоков
     }
 });
 
-// Обработчик кнопки "Остановить"
 document.getElementById('stopStreamBtn').addEventListener('click', () => {
-    stopStream(true);
+    stopStream();
 });
 
-// Обработчик выбора файла
-document.getElementById('videoFile').addEventListener('change', (event) => {
-    videoFile = event.target.files[0];
-    const previewVideo = document.getElementById('previewVideo');
-    if (videoFile) {
-        previewVideo.src = URL.createObjectURL(videoFile);
-        previewVideo.load(); // Загружаем видео для предпросмотра
-    } else {
-        previewVideo.src = '';
-        previewVideo.removeAttribute('src');
-        previewVideo.load();
-    }
-});
+function stopStream() {
+    const streamStatusDiv = document.getElementById('streamStatus');
+    const startBtn = document.getElementById('startStreamBtn');
+    const stopBtn = document.getElementById('stopStreamBtn');
 
-async function deleteStream(streamKey) {
-    try {
-        const response = await fetch(`/api/streams/${streamKey}`, {
-            method: 'DELETE'
-        });
-        
-        if (response.ok) {
-            // Обновляем список потоков после успешного удаления
-            await loadStreams();
-        } else {
-            console.error('Error deleting stream:', await response.text());
+    if (wsConnection) {
+        // Очищаем интервал обновления телеметрии
+        if (wsConnection.telemetryInterval) {
+            clearInterval(wsConnection.telemetryInterval);
         }
-    } catch (error) {
-        console.error('Error deleting stream:', error);
+        
+        if (wsConnection.readyState === WebSocket.OPEN) {
+            console.log('Закрываю WebSocket соединение...');
+            wsConnection.close(1000, 'Stream stopped by user');
+        }
     }
+
+    // Обновляем UI
+    streamStatusDiv.classList.remove('alert-success', 'alert-danger');
+    streamStatusDiv.classList.add('alert-info');
+    streamStatusDiv.innerText = 'Трансляция остановлена.';
+
+    startBtn.style.display = 'inline-block';
+    stopBtn.style.display = 'none';
+    startBtn.disabled = false;
+    
+    // Удаляем маркер с карты
+    if (markers[streamKey]) {
+        map.removeLayer(markers[streamKey]);
+        delete markers[streamKey];
+    }
+    
+    fetchDataAndUpdateUI();
+}
+
+var video = document.getElementById('hlsPlayer');
+if (Hls.isSupported()) {
+  var hls = new Hls();
+  hls.loadSource(`http://localhost:8888/${streamKey}`);
+  hls.attachMedia(video);
+  hls.on(Hls.Events.MANIFEST_PARSED, function() {
+    video.play();
+  });
+} else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+  video.src = `http://localhost:8888/${streamKey}`;
+  video.addEventListener('loadedmetadata', function() {
+    video.play();
+  });
 }
 </script>
+
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
+
 {% endblock %} 
